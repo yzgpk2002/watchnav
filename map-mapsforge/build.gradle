@@ -1,0 +1,28 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.watchnav.mapsforge'
+    compileSdk 36
+
+    defaultConfig {
+        minSdk 30
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation project(':nav-core')
+    implementation project(':session')
+    api 'org.mapsforge:mapsforge-map-android:0.25.0'
+    implementation 'org.mapsforge:mapsforge-map-reader:0.25.0'
+}

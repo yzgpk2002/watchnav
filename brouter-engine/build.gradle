@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.watchnav.brouter'
+    compileSdk 36
+
+    defaultConfig {
+        minSdk 30
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += [
+                '../../third-party/brouter/brouter-core/src/main/java',
+                '../../third-party/brouter/brouter-mapaccess/src/main/java',
+                '../../third-party/brouter/brouter-util/src/main/java',
+                '../../third-party/brouter/brouter-expressions/src/main/java',
+                '../../third-party/brouter/brouter-codec/src/main/java',
+            ]
+            assets.srcDirs += ['../../third-party/brouter/misc/profiles2']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    api project(':routing-api')
+    testImplementation 'org.jetbrains.kotlin:kotlin-test-junit5'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+}
+
+tasks.withType(Test).configureEach { useJUnitPlatform() }

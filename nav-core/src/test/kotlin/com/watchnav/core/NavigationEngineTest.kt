@@ -1,0 +1,57 @@
+package com.watchnav.core
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class NavigationEngineTest {
+    private val course = Course(
+        name = "Northbound",
+        points = listOf(
+            CoursePoint(GeoPoint(31.0000, 121.0000)),
+            CoursePoint(GeoPoint(31.0010, 121.0000)),
+            CoursePoint(GeoPoint(31.0020, 121.0000)),
+        ),
+    )
+
+    @Test
+    fun progressIsStableAndRemainingDistanceShrinks() {
+        val engine = NavigationEngine(course, ActivityMode.HIKE)
+        val first = engine.update(fix(31.0004, 121.00002, 1))
+        val second = engine.update(fix(31.0014, 121.00002, 2))
+        val noisyBackward = engine.update(fix(31.0013, 121.00002, 3))
+
+        assertTrue(second.match.stableProgressMeters > first.match.stableProgressMeters)
+        assertEquals(second.match.stableProgressMeters, noisyBackward.match.stableProgressMeters)
+        assertTrue(second.match.remainingMeters < first.match.remainingMeters)
+    }
+
+    @Test
+    fun offCourseRequiresConfirmationAndRecoveryUsesHysteresis() {
+        val engine = NavigationEngine(course, ActivityMode.HIKE)
+        assertEquals(CourseAdherence.SUSPECTED_OFF_COURSE, engine.update(fix(31.0005, 121.0010, 1)).adherence.state)
+        assertEquals(CourseAdherence.SUSPECTED_OFF_COURSE, engine.update(fix(31.0006, 121.0010, 2)).adherence.state)
+        assertEquals(CourseAdherence.OFF_COURSE, engine.update(fix(31.0007, 121.0010, 3)).adherence.state)
+        assertEquals(CourseAdherence.REJOINING, engine.update(fix(31.0008, 121.00001, 4)).adherence.state)
+        assertEquals(CourseAdherence.REJOINING, engine.update(fix(31.0009, 121.00001, 5)).adherence.state)
+        assertEquals(CourseAdherence.ON_COURSE, engine.update(fix(31.0010, 121.00001, 6)).adherence.state)
+    }
+
+    @Test
+    fun restoredProgressDoesNotJumpBackAfterProcessRestart() {
+        val engine = NavigationEngine(course, ActivityMode.HIKE)
+        engine.restoreProgress(150.0)
+
+        val update = engine.update(fix(31.0002, 121.00001, 1))
+
+        assertTrue(update.match.stableProgressMeters >= 150.0)
+        assertTrue(update.match.remainingMeters <= engine.preparedCourse.totalDistanceMeters - 150.0)
+    }
+
+    private fun fix(lat: Double, lon: Double, second: Long) = LocationFix(
+        position = GeoPoint(lat, lon),
+        accuracyMeters = 5.0,
+        timestampMillis = second * 1_000,
+        bearingDegrees = 0.0,
+    )
+}
