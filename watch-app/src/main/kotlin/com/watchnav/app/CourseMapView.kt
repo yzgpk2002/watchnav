@@ -16,32 +16,41 @@ import kotlin.math.max
 
 class CourseMapView(context: Context) : View(context) {
     private val routePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(90, 95, 102)
-        strokeWidth = 7f
+        color = Color.rgb(151, 71, 255)
+        strokeWidth = 8f
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
-    private val completedPaint = Paint(routePaint).apply { color = Color.rgb(85, 226, 141) }
-    private val positionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(255, 184, 77)
+    private val completedPaint = Paint(routePaint).apply { color = Color.rgb(218, 112, 255) }
+    private val landmarkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 214, 64)
         style = Paint.Style.FILL
+    }
+    private val landmarkTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        textSize = 14f
+        style = Paint.Style.FILL
+    }
+    private val positionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(198, 92, 255)
+        strokeWidth = 4f
+        style = Paint.Style.STROKE
     }
     private val accuracyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(45, 255, 184, 77)
+        color = Color.argb(65, 198, 92, 255)
         style = Paint.Style.FILL
     }
-    private val headingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        strokeWidth = 5f
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
+    private val positionCenterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(198, 92, 255)
+        style = Paint.Style.FILL
     }
 
     private var course: Course? = null
     private var preparedCourse: PreparedCourse? = null
     private var renderPointIndices = IntArray(0)
     private var telemetry: NavigationTelemetry = NavigationTelemetry()
+    private var headingDegrees: Double? = null
     private var viewport: CourseViewport? = null
 
     fun setCourse(value: Course?) {
@@ -56,10 +65,16 @@ class CourseMapView(context: Context) : View(context) {
         telemetry = value
         invalidate()
     }
+    private val routePath = Path()
+
+    fun setHeadingDegrees(value: Double) {
+        headingDegrees = value
+        invalidate()
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawColor(Color.rgb(8, 10, 12))
+        canvas.drawColor(Color.rgb(248, 247, 238))
         val currentCourse = course ?: return
         val prepared = preparedCourse ?: return
         if (currentCourse.points.size < 2) return
@@ -70,6 +85,13 @@ class CourseMapView(context: Context) : View(context) {
         drawRoute(canvas, currentCourse, viewport, completedPaint) { pointIndex ->
             prepared.cumulativeDistanceMeters[pointIndex] <= progress
         }
+        currentCourse.landmarks.forEach { landmark ->
+            val screen = viewport.project(landmark.position)
+            canvas.drawCircle(screen.first, screen.second, 6f, landmarkPaint)
+            landmark.name?.take(12)?.let { name ->
+                canvas.drawText(name, screen.first + 8f, screen.second - 7f, landmarkTextPaint)
+            }
+        }
         telemetry.position?.let { position ->
             val screenPoint = viewport.project(position)
             val accuracy = telemetry.horizontalAccuracyMeters ?: 0.0
@@ -77,19 +99,16 @@ class CourseMapView(context: Context) : View(context) {
             if (accuracyPixels > 3f) {
                 canvas.drawCircle(screenPoint.first, screenPoint.second, accuracyPixels, accuracyPaint)
             }
-            canvas.drawCircle(screenPoint.first, screenPoint.second, 10f, positionPaint)
-            telemetry.bearingDegrees?.let { bearing ->
-                val radians = Math.toRadians(bearing)
-                val dx = kotlin.math.sin(radians).toFloat() * 24f
-                val dy = -kotlin.math.cos(radians).toFloat() * 24f
-                canvas.drawLine(
-                    screenPoint.first,
-                    screenPoint.second,
-                    screenPoint.first + dx,
-                    screenPoint.second + dy,
-                    headingPaint,
-                )
-            }
+            val x = screenPoint.first
+            val y = screenPoint.second
+            val radius = resources.displayMetrics.density * 10f
+            val tick = resources.displayMetrics.density * 5f
+            canvas.drawCircle(x, y, radius, positionPaint)
+            canvas.drawLine(x - radius - tick, y, x - radius + tick, y, positionPaint)
+            canvas.drawLine(x + radius - tick, y, x + radius + tick, y, positionPaint)
+            canvas.drawLine(x, y - radius - tick, x, y - radius + tick, positionPaint)
+            canvas.drawLine(x, y + radius - tick, x, y + radius + tick, positionPaint)
+            canvas.drawCircle(x, y, resources.displayMetrics.density * 2.8f, positionCenterPaint)
         }
     }
 
@@ -114,21 +133,20 @@ class CourseMapView(context: Context) : View(context) {
         paint: Paint,
         includePoint: (Int) -> Boolean,
     ) {
-        var path = Path()
+        routePath.rewind()
         var hasPath = false
         renderPointIndices.forEach { index ->
             if (!includePoint(index)) return@forEach
             val point = course.points[index]
             val screen = viewport.project(point.position)
             if (!hasPath || index in course.breakBeforePointIndices) {
-                if (hasPath) canvas.drawPath(path, paint)
-                path = Path().apply { moveTo(screen.first, screen.second) }
+                routePath.moveTo(screen.first, screen.second)
                 hasPath = true
             } else {
-                path.lineTo(screen.first, screen.second)
+                routePath.lineTo(screen.first, screen.second)
             }
         }
-        if (hasPath) canvas.drawPath(path, paint)
+        if (hasPath) canvas.drawPath(routePath, paint)
     }
 
     private class CourseViewport(course: Course, width: Int, height: Int, padding: Float) {

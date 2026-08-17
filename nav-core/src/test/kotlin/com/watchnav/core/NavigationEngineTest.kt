@@ -48,6 +48,42 @@ class NavigationEngineTest {
         assertTrue(update.match.remainingMeters <= engine.preparedCourse.totalDistanceMeters - 150.0)
     }
 
+    @Test
+    fun lateArrivalInsideGnssAccuracyCircleCompletesTheCourse() {
+        val engine = NavigationEngine(course, ActivityMode.HIKE)
+        engine.restoreProgress(engine.preparedCourse.totalDistanceMeters * 0.80)
+
+        val update = engine.update(
+            LocationFix(
+                position = GeoPoint(31.00175, 121.0),
+                accuracyMeters = 20.0,
+                timestampMillis = 1_000,
+            ),
+        )
+
+        assertEquals(0.0, update.match.remainingMeters)
+        assertEquals(engine.preparedCourse.totalDistanceMeters, update.match.stableProgressMeters)
+    }
+
+    @Test
+    fun closedLoopDoesNotCompleteWhileStillAtTheStart() {
+        val start = GeoPoint(31.0, 121.0)
+        val loop = Course(
+            name = "Loop",
+            points = listOf(
+                CoursePoint(start),
+                CoursePoint(GeoPoint(31.01, 121.0)),
+                CoursePoint(GeoPoint(31.01, 121.01)),
+                CoursePoint(start),
+            ),
+        )
+        val engine = NavigationEngine(loop, ActivityMode.HIKE)
+
+        val update = engine.update(fix(start.latitude, start.longitude, 1))
+
+        assertTrue(update.match.remainingMeters > 0.0)
+    }
+
     private fun fix(lat: Double, lon: Double, second: Long) = LocationFix(
         position = GeoPoint(lat, lon),
         accuracyMeters = 5.0,

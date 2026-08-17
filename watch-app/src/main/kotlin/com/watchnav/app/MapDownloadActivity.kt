@@ -1,7 +1,9 @@
 package com.watchnav.app
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.location.Location
@@ -26,12 +28,18 @@ import com.watchnav.packages.DirectMapPackageInstaller
 import com.watchnav.packages.ExtractProgress
 import com.watchnav.packages.ExtractStage
 import com.watchnav.packages.MapDownloadRegion
+import com.watchnav.packages.RegionBounds
+import com.watchnav.packages.RoutingRegionDownloadProgress
+import com.watchnav.packages.RoutingRegionDownloader
 import com.watchnav.session.CourseFileStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MapDownloadActivity : ComponentActivity() {
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLanguageController.wrap(newBase))
+    }
     private lateinit var mapView: MapRegionSelectionView
     private lateinit var regionText: TextView
     private lateinit var providerText: TextView
@@ -48,6 +56,9 @@ class MapDownloadActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        selectedLayer = intent.getStringExtra(EXTRA_INITIAL_LAYER)
+            ?.let { value -> MapLayerKind.entries.firstOrNull { it.name == value } }
+            ?: MapLayerKind.NORMAL
         setContentView(buildContent())
         mapView.onRegionChanged = { region -> renderRegion(region) }
         renderRegion(mapView.region)
@@ -62,7 +73,7 @@ class MapDownloadActivity : ComponentActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(14), dp(10), dp(14), dp(22))
+            setPadding(dp(24), dp(34), dp(24), dp(24))
             setBackgroundColor(Color.BLACK)
         }
         root.addView(TextView(this).apply {
@@ -72,7 +83,10 @@ class MapDownloadActivity : ComponentActivity() {
             setTextColor(Color.rgb(85, 226, 141))
         }, matchWrap())
 
-        mapView = MapRegionSelectionView(this).apply { minimumHeight = dp(250) }
+        mapView = MapRegionSelectionView(this).apply {
+            minimumHeight = dp(250)
+            setLayer(selectedLayer)
+        }
         root.addView(
             mapView,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(270)),
@@ -169,6 +183,7 @@ class MapDownloadActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission") // requestLocation checks FINE_LOCATION; calls are also guarded for revocation.
     private fun locateCurrentPosition() {
         if (locating) return
         locating = true
@@ -267,9 +282,11 @@ class MapDownloadActivity : ComponentActivity() {
 
     private fun downloadNormalMap() {
         startDownload {
-            BbbikeExtractInstaller(this).requestAndInstall(mapView.region.bounds) { progress ->
+            val bounds = mapView.region.bounds
+            BbbikeExtractInstaller(this).requestAndInstall(bounds) { progress ->
                 runOnUiThread { renderExtractProgress(progress) }
             }
+            installRoutingRegions(bounds)
         }
     }
 
@@ -291,16 +308,37 @@ class MapDownloadActivity : ComponentActivity() {
                     }
                 }
             }
+            installRoutingRegions(mapView.region.bounds)
         }
     }
 
-    private fun startDownload(block: () -> java.io.File) {
+    private fun installRoutingRegions(bounds: RegionBounds): String? = runCatching {
+        RoutingRegionDownloader(this).install(bounds) { progress ->
+            runOnUiThread { renderRoutingProgress(progress) }
+        }
+    }.exceptionOrNull()?.let { error -> error.message ?: error.javaClass.simpleName }
+
+    private fun startDownload(block: () -> String?) {
         downloadButton.isEnabled = false
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         lifecycleScope.launch {
             runCatching { withContext(Dispatchers.IO) { block() } }
-                .onSuccess {
-                    statusText.setText(R.string.map_download_ready)
+                .onSuccess { routingWarning ->
+                    getSharedPreferences(MAP_PREFERENCES, MODE_PRIVATE).edit()
+                        .putString(
+                            KEY_ACTIVE_MAP_KIND,
+                            if (selectedLayer == MapLayerKind.CONTOUR) {
+                                com.watchnav.sync.protocol.TransferKind.CONTOUR_MAP.name
+                            } else {
+                                com.watchnav.sync.protocol.TransferKind.MAPSFORGE.name
+                            },
+                        )
+                        .apply()
+                    statusText.text = if (routingWarning == null) {
+                        getString(R.string.map_download_ready)
+                    } else {
+                        getString(R.string.map_ready_routing_failed, routingWarning)
+                    }
                     setResult(RESULT_OK)
                 }
                 .onFailure { error ->
@@ -312,6 +350,17 @@ class MapDownloadActivity : ComponentActivity() {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             downloadButton.isEnabled = true
         }
+    }
+
+    private fun renderRoutingProgress(progress: RoutingRegionDownloadProgress) {
+        statusText.text = getString(
+            R.string.routing_region_downloading,
+            progress.regionIndex,
+            progress.regionCount,
+            progress.regionId,
+            progress.downloadedBytes / MEGABYTE,
+            progress.totalBytes / MEGABYTE,
+        )
     }
 
     private fun renderExtractProgress(progress: ExtractProgress) {
@@ -349,8 +398,15 @@ class MapDownloadActivity : ComponentActivity() {
     private fun weightedButton() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    private companion object {
-        const val LAST_LOCATION_MAX_AGE_MILLIS = 30L * 60 * 1000
-        const val MEGABYTE = 1024.0 * 1024.0
+    companion object {
+        private const val EXTRA_INITIAL_LAYER = "com.watchnav.app.extra.INITIAL_MAP_LAYER"
+        private const val LAST_LOCATION_MAX_AGE_MILLIS = 30L * 60 * 1000
+        private const val MEGABYTE = 1024.0 * 1024.0
+        private const val MAP_PREFERENCES = "map_installation"
+        private const val KEY_ACTIVE_MAP_KIND = "active_map_kind"
+
+        fun intent(context: Context, layer: MapLayerKind): Intent =
+            Intent(context, MapDownloadActivity::class.java)
+                .putExtra(EXTRA_INITIAL_LAYER, layer.name)
     }
 }

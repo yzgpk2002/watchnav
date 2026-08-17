@@ -19,12 +19,15 @@ data class NavigationTelemetry(
     val phase: SessionPhase = SessionPhase.IDLE,
     val courseName: String? = null,
     val position: GeoPoint? = null,
+    val routeJoinPosition: GeoPoint? = null,
+    val breadcrumbTrail: List<GeoPoint> = emptyList(),
     val progressMeters: Double = 0.0,
     val remainingMeters: Double = 0.0,
     val crossTrackMeters: Double? = null,
     val horizontalAccuracyMeters: Double? = null,
     val speedMetersPerSecond: Double? = null,
     val bearingDegrees: Double? = null,
+    val compassCalibrationNeeded: Boolean = false,
     val currentElevationMeters: Double? = null,
     val gradePercent: Double? = null,
     val verticalSpeedMetersPerHour: Double? = null,
@@ -64,6 +67,34 @@ object NavigationStateHub {
 
     fun removeListener(listener: (NavigationTelemetry) -> Unit) {
         listeners -= listener
+    }
+
+    /**
+     * Immediately removes stale progress from the UI while the service is shutting down.
+     * The next selected course can then start from a clean distance state.
+     */
+    fun resetToIdle() {
+        publish(NavigationTelemetry())
+    }
+
+    /** Clears progress from the previous course while retaining an immediate distance preview. */
+    fun previewCourse(
+        courseName: String,
+        totalDistanceMeters: Double,
+        totalAscentMeters: Double,
+        position: GeoPoint?,
+    ) {
+        publish(
+            NavigationTelemetry(
+                phase = SessionPhase.IDLE,
+                courseName = courseName,
+                position = position,
+                remainingMeters = totalDistanceMeters.coerceAtLeast(0.0),
+                totalAscentMeters = totalAscentMeters.coerceAtLeast(0.0),
+                remainingAscentMeters = totalAscentMeters.coerceAtLeast(0.0),
+                updatedAtMillis = System.currentTimeMillis(),
+            ),
+        )
     }
 
     internal fun publish(telemetry: NavigationTelemetry) {

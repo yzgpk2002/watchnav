@@ -16,6 +16,7 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import com.watchnav.packages.MapDownloadRegion
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
@@ -282,50 +283,55 @@ class MapRegionSelectionView @JvmOverloads constructor(
     }
 
     private fun downloadTile(initialUrl: URL, destination: File): Bitmap? {
-        var url = initialUrl
-        repeat(4) {
-            val connection = (url.openConnection() as HttpsURLConnection).apply {
-                instanceFollowRedirects = false
-                connectTimeout = 8_000
-                readTimeout = 12_000
-                setRequestProperty("User-Agent", "WatchNav/0.9 (interactive map preview)")
-            }
-            try {
-                when (val code = connection.responseCode) {
-                    HttpURLConnection.HTTP_OK -> {
-                        val bytes = connection.inputStream.use { input ->
-                            val output = java.io.ByteArrayOutputStream()
-                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                            while (true) {
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                if (output.size() + count > MAXIMUM_TILE_BYTES) return null
-                                output.write(buffer, 0, count)
-                            }
-                            output.toByteArray()
-                        }
-                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-                        destination.parentFile?.mkdirs()
-                        destination.outputStream().use { it.write(bytes) }
-                        return bitmap
-                    }
-                    HttpURLConnection.HTTP_MOVED_PERM,
-                    HttpURLConnection.HTTP_MOVED_TEMP,
-                    HttpURLConnection.HTTP_SEE_OTHER,
-                    307,
-                    308,
-                    -> {
-                        val next = URL(url, connection.getHeaderField("Location") ?: return null)
-                        if (next.protocol != "https" || next.userInfo != null) return null
-                        url = next
-                    }
-                    else -> return null
+        return try {
+            var url = initialUrl
+            repeat(4) {
+                val connection = (url.openConnection() as HttpsURLConnection).apply {
+                    instanceFollowRedirects = false
+                    connectTimeout = 8_000
+                    readTimeout = 12_000
+                    setRequestProperty("User-Agent", "WatchNav/${BuildConfig.VERSION_NAME} (interactive map preview)")
                 }
-            } finally {
-                connection.disconnect()
+                try {
+                    when (val code = connection.responseCode) {
+                        HttpURLConnection.HTTP_OK -> {
+                            val bytes = connection.inputStream.use { input ->
+                                val output = java.io.ByteArrayOutputStream()
+                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                                while (true) {
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    if (output.size() + count > MAXIMUM_TILE_BYTES) return null
+                                    output.write(buffer, 0, count)
+                                }
+                                output.toByteArray()
+                            }
+                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+                            destination.parentFile?.mkdirs()
+                            destination.outputStream().use { it.write(bytes) }
+                            return bitmap
+                        }
+                        HttpURLConnection.HTTP_MOVED_PERM,
+                        HttpURLConnection.HTTP_MOVED_TEMP,
+                        HttpURLConnection.HTTP_SEE_OTHER,
+                        307,
+                        308,
+                        -> {
+                            val next = URL(url, connection.getHeaderField("Location") ?: return null)
+                            if (next.protocol != "https" || next.userInfo != null) return null
+                            url = next
+                        }
+                        else -> return null
+                    }
+                } finally {
+                    connection.disconnect()
+                }
             }
+            null
+        } catch (_: IOException) {
+            // Preview tiles are optional. A slow or blocked provider must not crash the map downloader.
+            null
         }
-        return null
     }
 
     private fun tileUrl(layer: MapLayerKind, zoom: Int, x: Int, y: Int): URL = when (layer) {

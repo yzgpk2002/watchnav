@@ -40,4 +40,7 @@ class NavigationEngine(course: Course, mode: ActivityMode) {
     fun restoreProgress(progressMeters: Double) {
         matcher.restoreProgress(progressMeters)
     }
+
+    fun segmentBearingDegrees(match: CourseMatch): Double? =
+        preparedCourse.segments.getOrNull(match.segmentIndex)?.bearingDegrees
 }

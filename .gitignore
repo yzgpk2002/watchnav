@@ -5,3 +5,21 @@ local.properties
 *.iml
 captures/
 
+# Local Codex/device QA evidence and generated deliverables
+/.codex-*
+/.codex-test/
+/.kotlin/
+/artifacts/
+/dist/
+/*.png
+/*.xml
+/design-qa.md
+
+# Device payloads and resumable downloads must not enter source control
+*.apk
+*.map
+*.mbtiles
+*.rd5
+*.part
+/scripts/windows-adb/watch-adb-*.txt
+

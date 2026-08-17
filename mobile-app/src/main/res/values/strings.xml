@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">WatchNav</string>
+    <string name="route_workshop">路线工坊</string>
+    <string name="watch_disconnected">手表未连接</string>
+    <string name="watch_connected">%1$s 已连接</string>
+    <string name="search_hint">搜索地点、标记、坐标</string>
+    <string name="layers">图层</string>
+    <string name="routes">路线</string>
+    <string name="marks">标记</string>
+    <string name="measure">测量</string>
+    <string name="watch_data">手表</string>
+    <string name="center">居中</string>
+    <string name="no_route">尚未导入路线</string>
+    <string name="route_distance">%1$.1f km</string>
+    <string name="route_duration">预计 %1$d 小时 %2$d 分</string>
+    <string name="route_start">起点：%1$s</string>
+    <string name="dependencies_ready">地图 · 等深线 · 路网 · 潮汐 已就绪</string>
+    <string name="dependencies_missing">离线资料待准备</string>
+    <string name="import_gpx_kml">接收</string>
+    <string name="receive_route">接收</string>
+    <string name="send_route">发送手表</string>
+    <string name="share_route">分享路线</string>
+    <string name="syncing">正在同步…</string>
+    <string name="sync_sent">路线已加入手表同步队列</string>
+    <string name="sync_no_watch">路线已保存，手表重连后自动同步</string>
+    <string name="import_failed">导入失败：%1$s</string>
+    <string name="import_ready">已导入：%1$s</string>
+    <string name="coordinate_system">导入文件坐标系</string>
+    <string name="data_date">数据日期：2026-08-11</string>
+</resources>

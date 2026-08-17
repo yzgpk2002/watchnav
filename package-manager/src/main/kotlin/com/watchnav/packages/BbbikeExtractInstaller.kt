@@ -3,13 +3,14 @@ package com.watchnav.packages
 import android.content.Context
 import com.watchnav.mapsforge.MapsforgeMapRepository
 import java.io.File
-import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.zip.ZipInputStream
 import javax.net.ssl.HttpsURLConnection
+import org.json.JSONObject
 
 enum class ExtractStage {
     SUBMITTING,
@@ -44,31 +45,45 @@ class BbbikeExtractInstaller(context: Context) {
         require(bounds.south < bounds.north && bounds.west < bounds.east) {
             "The selected area crosses the date line"
         }
-        val requestId = "watchnav-${System.currentTimeMillis()}"
+        val requestId = stableRequestId(bounds)
         onProgress(ExtractProgress(ExtractStage.SUBMITTING))
         val retryReporter: (Int, Long) -> Unit = { attempt, delay ->
             onProgress(ExtractProgress(ExtractStage.RETRYING, retryAttempt = attempt, retryDelayMillis = delay))
         }
         val landingPage = readText(EXTRACT_URL, MAXIMUM_HTML_BYTES, retryReporter)
         val expiry = parseExpiry(landingPage) ?: error("Map service did not provide a request token")
-        val response = readText(buildRequestUrl(bounds, requestId, expiry), MAXIMUM_HTML_BYTES, retryReporter)
+        val sizeResponse = readText(buildSizeUrl(bounds), MAXIMUM_SIZE_RESPONSE_BYTES, retryReporter)
+        val estimatedMegabytes = parseEstimatedSize(sizeResponse)
+            ?: error("Map service did not provide a valid size estimate")
+        val response = readText(
+            buildRequestUrl(bounds, requestId, expiry, estimatedMegabytes),
+            MAXIMUM_HTML_BYTES,
+            retryReporter,
+        )
+        require(!response.contains("The input data is not valid", ignoreCase = true)) {
+            "Map service rejected the selected area"
+        }
         require(!response.contains("Area too large", ignoreCase = true)) { "Selected area is too large" }
 
         onProgress(ExtractProgress(ExtractStage.WAITING))
         val downloadUrl = waitForDownload(requestId, retryReporter)
         stagingDirectory.mkdirs()
         check(stagingDirectory.isDirectory) { "Unable to create map download storage" }
-        val archive = File(stagingDirectory, "$requestId.zip")
+        val archive = File(stagingDirectory, "$requestId.zip.part")
         onProgress(ExtractProgress(ExtractStage.DOWNLOADING))
         val mapFile = File(stagingDirectory, "$requestId.map")
+        var installed = false
         try {
             download(downloadUrl, archive, onProgress, retryReporter)
             onProgress(ExtractProgress(ExtractStage.VERIFYING))
-            extractMap(archive, mapFile)
-            return mapRepository.installVerified(mapFile)
+            runCatching { extractMap(archive, mapFile) }.getOrElse { error ->
+                archive.delete()
+                throw error
+            }
+            return mapRepository.installVerified(mapFile).also { installed = true }
         } finally {
-            archive.delete()
             mapFile.delete()
+            if (installed) archive.delete()
         }
     }
 
@@ -81,7 +96,26 @@ class BbbikeExtractInstaller(context: Context) {
         error("Map generation timed out; try again later")
     }
 
-    private fun buildRequestUrl(bounds: RegionBounds, requestId: String, expiry: String): URL {
+    private fun buildSizeUrl(bounds: RegionBounds): URL {
+        val parameters = linkedMapOf(
+            "format" to "mapsforge-osm.zip",
+            "lat_sw" to coordinate(bounds.south),
+            "lng_sw" to coordinate(bounds.west),
+            "lat_ne" to coordinate(bounds.north),
+            "lng_ne" to coordinate(bounds.east),
+        )
+        val query = parameters.entries.joinToString("&") { (key, value) ->
+            "${encode(key)}=${encode(value)}"
+        }
+        return URL("$SIZE_URL?$query")
+    }
+
+    private fun buildRequestUrl(
+        bounds: RegionBounds,
+        requestId: String,
+        expiry: String,
+        estimatedMegabytes: Double,
+    ): URL {
         val parameters = linkedMapOf(
             "lang" to "en",
             "sw_lng" to coordinate(bounds.west),
@@ -91,8 +125,8 @@ class BbbikeExtractInstaller(context: Context) {
             "format" to "mapsforge-osm.zip",
             "city" to requestId,
             "email" to "nobody",
-            "as" to "-1",
-            "pg" to "0",
+            "as" to String.format(Locale.US, "%.3f", estimatedMegabytes),
+            "pg" to "1",
             "coords" to "",
             "oi" to "0",
             "layers" to "",
@@ -114,60 +148,17 @@ class BbbikeExtractInstaller(context: Context) {
         downloadOnce(url, destination, onProgress)
     }
 
-    private fun downloadOnce(url: URL, destination: File, onProgress: (ExtractProgress) -> Unit) {
-        var currentUrl = requireHttps(url)
-        repeat(MAXIMUM_REDIRECTS + 1) { redirectCount ->
-            val connection = (currentUrl.openConnection() as HttpsURLConnection).apply {
-                instanceFollowRedirects = false
-                connectTimeout = CONNECT_TIMEOUT_MILLIS
-                readTimeout = READ_TIMEOUT_MILLIS
-                setRequestProperty("User-Agent", USER_AGENT)
-            }
-            try {
-                when (val code = connection.responseCode) {
-                    HttpURLConnection.HTTP_OK -> {
-                        val total = connection.contentLengthLong
-                        var written = 0L
-                        connection.inputStream.buffered().use { input ->
-                            FileOutputStream(destination, false).buffered().use { output ->
-                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                                while (true) {
-                                    val count = input.read(buffer)
-                                    if (count < 0) break
-                                    written += count
-                                    require(written <= MAXIMUM_ARCHIVE_BYTES) { "Map archive is too large" }
-                                    output.write(buffer, 0, count)
-                                    onProgress(ExtractProgress(ExtractStage.DOWNLOADING, written, total))
-                                }
-                            }
-                        }
-                        require(written > 0) { "Map service returned an empty archive" }
-                        return
-                    }
-                    HttpURLConnection.HTTP_MOVED_PERM,
-                    HttpURLConnection.HTTP_MOVED_TEMP,
-                    HttpURLConnection.HTTP_SEE_OTHER,
-                    307,
-                    308,
-                    -> {
-                        if (redirectCount == MAXIMUM_REDIRECTS) error("Too many map download redirects")
-                        val location = connection.getHeaderField("Location") ?: error("Missing redirect URL")
-                        currentUrl = requireHttps(URL(currentUrl, location))
-                    }
-                    else -> if (HttpRetryPolicy.shouldRetry(code)) {
-                        throw RetryableHttpException(
-                            code,
-                            HttpRetryPolicy.retryAfterMillis(connection.getHeaderField("Retry-After")),
-                        )
-                    } else {
-                        error("Map download returned HTTP $code")
-                    }
-                }
-            } finally {
-                connection.disconnect()
-            }
+    private fun downloadOnce(url: URL, destination: File, onProgress: (ExtractProgress) -> Unit) =
+        HttpRangeDownloader.download(
+            url,
+            destination,
+            MAXIMUM_ARCHIVE_BYTES,
+            CONNECT_TIMEOUT_MILLIS,
+            READ_TIMEOUT_MILLIS,
+            USER_AGENT,
+        ) { written, total ->
+            onProgress(ExtractProgress(ExtractStage.DOWNLOADING, written, total))
         }
-    }
 
     private fun extractMap(archive: File, destination: File) {
         var found = false
@@ -264,6 +255,11 @@ class BbbikeExtractInstaller(context: Context) {
                 val delay = HttpRetryPolicy.delayMillis(attempt, error.retryAfterMillis)
                 onRetry(attempt, delay)
                 Thread.sleep(delay)
+            } catch (error: IOException) {
+                if (attempt == HttpRetryPolicy.MAXIMUM_ATTEMPTS) throw error
+                val delay = HttpRetryPolicy.delayMillis(attempt)
+                onRetry(attempt, delay)
+                Thread.sleep(delay)
             }
         }
         error("Map service retry loop ended unexpectedly")
@@ -278,12 +274,14 @@ class BbbikeExtractInstaller(context: Context) {
 
     companion object {
         private val EXTRACT_URL = URL("https://extract.bbbike.org/")
-        private val STATUS_URL = URL("https://download.bbbike.org/osm/extract/?date=1h&format=mapsforge")
-        private const val USER_AGENT = "WatchNav/0.9 (Wear OS offline map client)"
+        private val SIZE_URL = URL("https://extract.bbbike.org/cgi/tile-size.cgi")
+        private val STATUS_URL = URL("https://download.bbbike.org/osm/extract/?date=1h;format=mapsforge")
+        private const val USER_AGENT = "WatchNav/0.9.2 (Wear OS offline map client)"
         private const val CONNECT_TIMEOUT_MILLIS = 20_000
         private const val READ_TIMEOUT_MILLIS = 60_000
         private const val MAXIMUM_REDIRECTS = 5
         private const val MAXIMUM_HTML_BYTES = 2 * 1024 * 1024
+        private const val MAXIMUM_SIZE_RESPONSE_BYTES = 32 * 1024
         private const val MAXIMUM_STATUS_BYTES = 4 * 1024 * 1024
         private const val MAXIMUM_ARCHIVE_BYTES = 2_000_000_000L
         private const val MAXIMUM_MAP_BYTES = 2_000_000_000L
@@ -294,6 +292,10 @@ class BbbikeExtractInstaller(context: Context) {
             "name=[\\\"']expire[\\\"'][^>]*value=[\\\"'](\\d+)[\\\"']",
             RegexOption.IGNORE_CASE,
         ).find(html)?.groupValues?.get(1)
+
+        internal fun parseEstimatedSize(json: String): Double? = runCatching {
+            JSONObject(json).getDouble("size").takeIf { it.isFinite() && it >= 0.0 }
+        }.getOrNull()
 
         internal fun parseDownloadUrl(html: String, requestId: String): String? {
             val escaped = Regex.escape(requestId)
@@ -308,5 +310,8 @@ class BbbikeExtractInstaller(context: Context) {
 
         private fun coordinate(value: Double): String = String.format(Locale.US, "%.6f", value)
         private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
+        private fun stableRequestId(bounds: RegionBounds): String = "watchnav-" + listOf(
+            bounds.south, bounds.west, bounds.north, bounds.east,
+        ).joinToString("-") { coordinate(it).replace("-", "m").replace(".", "p") }
     }
 }

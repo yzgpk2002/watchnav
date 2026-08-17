@@ -1,0 +1,50 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.watchnav.mobile'
+    compileSdk 36
+
+    buildFeatures { buildConfig true }
+
+    defaultConfig {
+        applicationId 'com.watchnav.app'
+        minSdk 30
+        targetSdk 35
+        versionCode 10049
+        versionName '0.20.26-companion'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    implementation project(':nav-core')
+    implementation project(':session')
+    implementation project(':map-mapsforge')
+    implementation project(':brouter-engine')
+    implementation project(':package-manager')
+    implementation project(':sync-protocol')
+    implementation project(':sync-transport')
+    implementation 'androidx.core:core-ktx:1.16.0'
+    implementation 'androidx.activity:activity-ktx:1.10.1'
+    implementation 'androidx.fragment:fragment-ktx:1.8.8'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+    implementation files('libs/sherpa-onnx.aar')
+    testImplementation 'junit:junit:4.13.2'
+}

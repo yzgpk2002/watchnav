@@ -6,5 +6,12 @@
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:windowBackground">#000000</item>
     </style>
+
+    <!-- Navigation is controlled by explicit on-screen actions. Wear OS edge swipes must not
+         dismiss the activity while the user is walking, fishing, or handling the wet watch. -->
+    <style name="NavigationAppTheme" parent="AppTheme">
+        <item name="android:windowSwipeToDismiss">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 </resources>
 

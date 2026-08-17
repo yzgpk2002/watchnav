@@ -29,6 +29,14 @@ class WaypointStore(context: Context) {
     }
 
     @Synchronized
+    fun upsert(waypoint: SavedWaypoint): SavedWaypoint {
+        require(waypoint.id.isNotBlank() && waypoint.id.length <= 160)
+        val retained = list().filterNot { it.id == waypoint.id }
+        write(retained + waypoint.copy(name = waypoint.name.take(80)))
+        return waypoint
+    }
+
+    @Synchronized
     fun list(): List<SavedWaypoint> {
         if (!file.isFile) return emptyList()
         val array = JSONArray(file.readText())

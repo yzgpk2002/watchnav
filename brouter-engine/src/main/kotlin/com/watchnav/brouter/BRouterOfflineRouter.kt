@@ -28,39 +28,12 @@ class BRouterOfflineRouter(context: Context) : OfflineRouter {
         if (missing.isNotEmpty()) return RouteResult.MissingRegion(missing)
 
         return runCatching {
-            ensureProfile(request.profile)
+            ensureRoutingAssets(request.profile)
             lateinit var result: RouteResult
             val elapsed = measureTimeMillis {
-                val routingContext = RoutingContext().apply {
-                    localFunction = profileFile(request.profile).absolutePath
-                    memoryclass = MEMORY_CLASS_MB
-                }
-                val engine = RoutingEngine(
-                    null,
-                    null,
-                    segmentDirectory,
-                    waypoints(request),
-                    routingContext,
-                ).apply { quite = true }
-                engine.doRun(MAXIMUM_ROUTING_MILLIS)
-                val error = engine.errorMessage
-                val track = engine.foundTrack
-                result = if (error != null) {
-                    RouteResult.Failure(error, recoverable = true)
-                } else if (track == null || track.nodes.size < 2) {
-                    RouteResult.Failure("BRouter returned no route", recoverable = true)
-                } else {
-                    val points = track.nodes.map { node ->
-                        CoursePoint(
-                            GeoPoint(
-                                latitude = (node.iLat - LATITUDE_OFFSET) / COORDINATE_SCALE,
-                                longitude = (node.iLon - LONGITUDE_OFFSET) / COORDINATE_SCALE,
-                                elevationMeters = node.sElev.takeUnless { it == Short.MIN_VALUE }
-                                    ?.let { it / 4.0 },
-                            ),
-                        )
-                    }
-                    RouteResult.Success(Course("Offline route", points), calculationMillis = 0L)
+                result = runEngine(request)
+                if (result is RouteResult.Failure && shouldRetryWithWideWaypointSearch(result)) {
+                    result = runEngine(request, WIDE_WAYPOINT_CATCHING_RANGE_METERS)
                 }
             }
             if (result is RouteResult.Success) {
@@ -131,11 +104,59 @@ class BRouterOfflineRouter(context: Context) : OfflineRouter {
             }
         }
 
-    private fun ensureProfile(profile: RoutingProfile) {
-        val destination = profileFile(profile)
-        if (destination.isFile) return
+    private fun ensureRoutingAssets(profile: RoutingProfile) {
         profileDirectory.mkdirs()
-        applicationContext.assets.open(profileAsset(profile)).use { input ->
+        copyAssetIfMissing(LOOKUPS_ASSET, File(profileDirectory, LOOKUPS_ASSET))
+        copyAssetIfMissing(profileAsset(profile), profileFile(profile))
+    }
+
+    private fun runEngine(request: RouteRequest, waypointCatchingRangeMeters: Double? = null): RouteResult {
+        val routingContext = RoutingContext().apply {
+            localFunction = profileFile(request.profile).absolutePath
+            memoryclass = MEMORY_CLASS_MB
+        }
+        val engine = RoutingEngine(
+            null,
+            null,
+            segmentDirectory,
+            waypoints(request),
+            routingContext,
+        ).apply {
+            quite = true
+            if (waypointCatchingRangeMeters != null) {
+                routingContext.waypointCatchingRange = waypointCatchingRangeMeters
+            }
+        }
+        engine.doRun(MAXIMUM_ROUTING_MILLIS)
+        val error = engine.errorMessage
+        val track = engine.foundTrack
+        if (error != null) return RouteResult.Failure(error, recoverable = true)
+        if (track == null || track.nodes.size < 2) {
+            return RouteResult.Failure("BRouter returned no route", recoverable = true)
+        }
+        val points = track.nodes.map { node ->
+            CoursePoint(
+                GeoPoint(
+                    latitude = (node.iLat - LATITUDE_OFFSET) / COORDINATE_SCALE,
+                    longitude = (node.iLon - LONGITUDE_OFFSET) / COORDINATE_SCALE,
+                    elevationMeters = node.sElev.takeUnless { it == Short.MIN_VALUE }?.let { it / 4.0 },
+                ),
+            )
+        }
+        return RouteResult.Success(Course("Offline route", points), calculationMillis = 0L)
+    }
+
+    private fun shouldRetryWithWideWaypointSearch(result: RouteResult.Failure): Boolean {
+        val reason = result.reason.lowercase()
+        return reason.contains("position not mapped") ||
+            reason.contains("no track found") ||
+            reason.contains("island detected") ||
+            reason.contains("returned no route")
+    }
+
+    private fun copyAssetIfMissing(assetName: String, destination: File) {
+        if (destination.isFile) return
+        applicationContext.assets.open(assetName).use { input ->
             destination.outputStream().use(input::copyTo)
         }
     }
@@ -155,7 +176,9 @@ class BRouterOfflineRouter(context: Context) : OfflineRouter {
         private const val LATITUDE_OFFSET = 90_000_000
         private const val MAXIMUM_ROUTING_MILLIS = 45_000L
         private const val MEMORY_CLASS_MB = 64
+        private const val WIDE_WAYPOINT_CATCHING_RANGE_METERS = 1_000.0
         private const val MAXIMUM_REGION_BYTES = 512L * 1024 * 1024
+        private const val LOOKUPS_ASSET = "lookups.dat"
 
         fun regionId(point: GeoPoint): String {
             val west = floor(point.longitude / 5.0).toInt() * 5

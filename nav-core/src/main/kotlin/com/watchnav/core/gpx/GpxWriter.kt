@@ -8,6 +8,19 @@ object GpxWriter {
         output.bufferedWriter(Charsets.UTF_8).use { writer ->
             writer.appendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
             writer.appendLine("<gpx version=\"1.1\" creator=\"WatchNav\" xmlns=\"http://www.topografix.com/GPX/1/1\">")
+            course.landmarks.forEach { point ->
+                writer.append("  <wpt lat=\"")
+                    .append(point.position.latitude.toString())
+                    .append("\" lon=\"")
+                    .append(point.position.longitude.toString())
+                    .appendLine("\">")
+                point.position.elevationMeters?.let {
+                    writer.append("    <ele>").append(it.toString()).appendLine("</ele>")
+                }
+                point.name?.let { writer.append("    <name>").append(xml(it)).appendLine("</name>") }
+                point.type?.let { writer.append("    <type>").append(xml(it)).appendLine("</type>") }
+                writer.appendLine("  </wpt>")
+            }
             writer.appendLine("  <trk>")
             writer.append("    <name>").append(xml(course.name)).appendLine("</name>")
             writer.appendLine("    <trkseg>")
@@ -26,6 +39,12 @@ object GpxWriter {
                 }
                 point.time?.let {
                     writer.append("        <time>").append(it.toString()).appendLine("</time>")
+                }
+                point.name?.let {
+                    writer.append("        <name>").append(xml(it)).appendLine("</name>")
+                }
+                point.type?.let {
+                    writer.append("        <type>").append(xml(it)).appendLine("</type>")
                 }
                 writer.appendLine("      </trkpt>")
             }

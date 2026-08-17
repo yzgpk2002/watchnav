@@ -2,11 +2,11 @@ package com.watchnav.packages
 
 import android.content.Context
 import com.watchnav.mapsforge.MapsforgeMapRepository
+import com.watchnav.mapsforge.VectorMapLayerKind
 import java.io.File
-import java.net.HttpURLConnection
+import java.io.IOException
 import java.net.URL
 import java.util.zip.ZipInputStream
-import javax.net.ssl.HttpsURLConnection
 
 data class RemoteMapPackage(
     val id: String,
@@ -80,15 +80,23 @@ class DirectMapPackageInstaller(context: Context) {
     ): File {
         staging.mkdirs()
         check(staging.isDirectory) { "Unable to create map download storage" }
-        val archive = File(staging, "${mapPackage.id}.zip")
+        val archive = File(staging, "${mapPackage.id}.zip.part")
         val extracted = File(staging, "${mapPackage.id}.map")
+        var installed = false
         try {
             download(mapPackage.url, archive, onProgress)
-            extractSingleMap(archive, extracted)
-            return mapRepository.installVerified(extracted)
+            runCatching { extractSingleMap(archive, extracted) }.getOrElse { error ->
+                archive.delete()
+                throw error
+            }
+            return mapRepository.installVerified(
+                extracted,
+                VectorMapLayerKind.CONTOUR,
+                mapPackage.displayName,
+            ).also { installed = true }
         } finally {
-            archive.delete()
             extracted.delete()
+            if (installed) archive.delete()
         }
     }
 
@@ -97,65 +105,10 @@ class DirectMapPackageInstaller(context: Context) {
         destination: File,
         onProgress: (Long, Long) -> Unit,
     ) = withTransientRetries {
-        downloadOnce(source, destination, onProgress)
-    }
-
-    private fun downloadOnce(
-        source: URL,
-        destination: File,
-        onProgress: (Long, Long) -> Unit,
-    ) {
-        var url = requireHttps(source)
-        repeat(MAXIMUM_REDIRECTS + 1) { redirectCount ->
-            val connection = (url.openConnection() as HttpsURLConnection).apply {
-                instanceFollowRedirects = false
-                connectTimeout = 20_000
-                readTimeout = 60_000
-                setRequestProperty("User-Agent", "WatchNav/0.9 (Wear OS offline map client)")
-            }
-            try {
-                when (val code = connection.responseCode) {
-                    HttpURLConnection.HTTP_OK -> {
-                        val total = connection.contentLengthLong
-                        var written = 0L
-                        connection.inputStream.buffered().use { input ->
-                            destination.outputStream().buffered().use { output ->
-                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                                while (true) {
-                                    val count = input.read(buffer)
-                                    if (count < 0) break
-                                    written += count
-                                    require(written <= MAXIMUM_ARCHIVE_BYTES) { "Map archive is too large" }
-                                    output.write(buffer, 0, count)
-                                    onProgress(written, total)
-                                }
-                            }
-                        }
-                        require(written > 0) { "Map service returned an empty archive" }
-                        return
-                    }
-                    HttpURLConnection.HTTP_MOVED_PERM,
-                    HttpURLConnection.HTTP_MOVED_TEMP,
-                    HttpURLConnection.HTTP_SEE_OTHER,
-                    307,
-                    308,
-                    -> {
-                        if (redirectCount == MAXIMUM_REDIRECTS) error("Too many redirects")
-                        url = requireHttps(URL(url, connection.getHeaderField("Location") ?: error("Missing redirect URL")))
-                    }
-                    else -> if (HttpRetryPolicy.shouldRetry(code)) {
-                        throw RetryableHttpException(
-                            code,
-                            HttpRetryPolicy.retryAfterMillis(connection.getHeaderField("Retry-After")),
-                        )
-                    } else {
-                        error("Map download returned HTTP $code")
-                    }
-                }
-            } finally {
-                connection.disconnect()
-            }
-        }
+        HttpRangeDownloader.download(
+            source, destination, MAXIMUM_ARCHIVE_BYTES, 20_000, 60_000,
+            "WatchNav/0.11 (Wear OS offline map client)", onProgress,
+        )
     }
 
     private fun <T> withTransientRetries(block: () -> T): T {
@@ -165,6 +118,9 @@ class DirectMapPackageInstaller(context: Context) {
             } catch (error: RetryableHttpException) {
                 if (attempt == HttpRetryPolicy.MAXIMUM_ATTEMPTS) throw error
                 Thread.sleep(HttpRetryPolicy.delayMillis(attempt, error.retryAfterMillis))
+            } catch (error: IOException) {
+                if (attempt == HttpRetryPolicy.MAXIMUM_ATTEMPTS) throw error
+                Thread.sleep(HttpRetryPolicy.delayMillis(attempt))
             }
         }
         error("Map package retry loop ended unexpectedly")
@@ -196,15 +152,7 @@ class DirectMapPackageInstaller(context: Context) {
         require(found && destination.length() > 0) { "Map archive does not contain a Mapsforge file" }
     }
 
-    private fun requireHttps(url: URL): URL {
-        require(url.protocol == "https" && url.host.isNotBlank() && url.userInfo == null) {
-            "Map package URL must use HTTPS"
-        }
-        return url
-    }
-
     private companion object {
-        const val MAXIMUM_REDIRECTS = 5
         const val MAXIMUM_ARCHIVE_BYTES = 2_000_000_000L
         const val MAXIMUM_MAP_BYTES = 2_000_000_000L
     }

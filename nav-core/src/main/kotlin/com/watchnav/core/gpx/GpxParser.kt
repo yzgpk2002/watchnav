@@ -130,6 +130,11 @@ class GpxParser(private val maximumCoursePoints: Int = 200_000) {
                 name = courseName ?: fallbackName,
                 points = selectedPoints,
                 breakBeforePointIndices = if (trackPoints.isNotEmpty()) trackBreaks else emptySet(),
+                landmarks = if (trackPoints.isNotEmpty() || routePoints.isNotEmpty()) {
+                    waypoints.map(GpxWaypoint::point)
+                } else {
+                    emptyList()
+                },
             ),
             waypoints = waypoints,
         )

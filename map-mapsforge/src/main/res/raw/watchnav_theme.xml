@@ -1,46 +1,50 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <rendertheme xmlns="http://mapsforge.org/renderTheme" version="5"
-    map-background="#080a0c" map-background-outside="#080a0c">
+    map-background="#f8f7ee" map-background-outside="#f8f7ee">
     <rule e="way" k="natural" v="water|bay|strait">
-        <area fill="#132838" />
+        <area fill="#88d8ff" />
     </rule>
     <rule e="way" k="waterway" v="*">
-        <line stroke="#2b6685" stroke-width="1.2" />
+        <line stroke="#0077b6" stroke-width="1.5" />
     </rule>
     <rule e="way" k="landuse" v="forest|wood|grass|meadow|recreation_ground">
-        <area fill="#10251c" />
+        <area fill="#b9e7a5" />
     </rule>
     <rule e="way" k="building" v="*" zoom-min="14">
-        <area fill="#25282c" stroke="#41464c" stroke-width="0.4" />
+        <area fill="#dedbd2" stroke="#595959" stroke-width="0.6" />
     </rule>
     <rule e="way" k="highway" v="motorway|trunk|primary|secondary">
-        <line stroke="#8b7350" stroke-width="3.0" />
+        <line stroke="#e05700" stroke-width="3.2" />
     </rule>
     <rule e="way" k="highway" v="tertiary|residential|unclassified|service">
-        <line stroke="#777d83" stroke-width="2.0" />
+        <line stroke="#343a40" stroke-width="2.2" />
     </rule>
     <rule e="way" k="highway" v="track|path|footway|bridleway|cycleway|steps">
-        <line stroke="#a0a79d" stroke-width="1.4" stroke-dasharray="4,3" />
+        <line stroke="#111111" stroke-width="1.7" stroke-dasharray="4,3" />
     </rule>
     <rule e="way" k="railway" v="rail|light_rail">
-        <line stroke="#656a70" stroke-width="1.2" stroke-dasharray="5,3" />
+        <line stroke="#555555" stroke-width="1.4" stroke-dasharray="5,3" />
     </rule>
     <!-- Mapsforge contour tags emitted by OpenAndroMaps/mapsforge contour pipelines. -->
-    <rule e="way" k="contour_ext" v="elevation_minor" zoom-min="13">
-        <line stroke="#3f493f" stroke-width="0.55" />
+    <rule e="way" k="contour_ext" v="elevation_minor" zoom-min="12">
+        <line stroke="#b68a5a" stroke-width="0.55" />
     </rule>
-    <rule e="way" k="contour_ext" v="elevation_medium" zoom-min="12">
-        <line stroke="#596052" stroke-width="0.8" />
+    <rule e="way" k="contour_ext" v="elevation_medium" zoom-min="11">
+        <line stroke="#986d42" stroke-width="0.75" />
+    </rule>
+    <rule e="way" k="contour_ext" v="elevation_major" zoom-min="9">
+        <line stroke="#734b25" stroke-width="1.05" />
     </rule>
     <rule e="way" k="contour_ext" v="elevation_major" zoom-min="11">
-        <line stroke="#777761" stroke-width="1.15" />
-        <pathText k="ele" font-size="11" fill="#c6c3a5" stroke="#080a0c"
-            stroke-width="1.8" repeat="true" repeat-gap="260" />
+        <pathText k="ele" font-size="11" fill="#3b2413" stroke="#ffffff"
+            stroke-width="1.8" repeat="true" repeat-gap="320" />
     </rule>
     <!-- Compatibility with map producers that use contour=elevation. -->
+    <rule e="way" k="contour" v="elevation" zoom-min="10">
+        <line stroke="#8b623c" stroke-width="0.75" />
+    </rule>
     <rule e="way" k="contour" v="elevation" zoom-min="12">
-        <line stroke="#666858" stroke-width="0.8" />
-        <pathText k="ele" font-size="10" fill="#b8b69d" stroke="#080a0c"
+        <pathText k="ele" font-size="10" fill="#3b2413" stroke="#ffffff"
             stroke-width="1.6" repeat="true" repeat-gap="280" />
     </rule>
 </rendertheme>

@@ -1,0 +1,3 @@
+-keep class com.watchnav.mobile.sync.MobileWearSyncService { *; }
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-keepclasseswithmembernames class * { native <methods>; }

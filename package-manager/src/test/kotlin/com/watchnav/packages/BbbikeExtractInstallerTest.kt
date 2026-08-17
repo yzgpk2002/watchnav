@@ -12,6 +12,13 @@ class BbbikeExtractInstallerTest {
     }
 
     @Test
+    fun `parses non-negative map size estimate`() {
+        assertEquals(6.539, BbbikeExtractInstaller.parseEstimatedSize("""{"size":6.539}"""))
+        assertNull(BbbikeExtractInstaller.parseEstimatedSize("""{"size":-1}"""))
+        assertNull(BbbikeExtractInstaller.parseEstimatedSize("not json"))
+    }
+
+    @Test
     fun `finds only matching mapsforge result`() {
         val html = """
             <table><tr>

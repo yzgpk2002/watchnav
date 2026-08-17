@@ -13,6 +13,7 @@ data class Course(
     val name: String,
     val points: List<CoursePoint>,
     val breakBeforePointIndices: Set<Int> = emptySet(),
+    val landmarks: List<CoursePoint> = emptyList(),
 ) {
     init {
         require(points.size >= 2) { "A course needs at least two points" }

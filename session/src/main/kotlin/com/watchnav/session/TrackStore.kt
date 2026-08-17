@@ -57,9 +57,20 @@ class TrackStore(context: Context) {
     }
 
     @Synchronized
-    fun course(name: String = "Recorded activity", reverse: Boolean = false): Course? {
+    fun course(
+        name: String = "Recorded activity",
+        reverse: Boolean = false,
+        simplifyToleranceMeters: Double = 0.0,
+    ): Course? {
         if (points.size < 2) return null
-        return Course(name, if (reverse) points.asReversed() else points.toList())
+        val source = Course(name, points.toList())
+        val retained = if (simplifyToleranceMeters > 0.0) {
+            com.watchnav.core.CourseRenderSimplifier.retainedPointIndices(source, simplifyToleranceMeters)
+                .map(points::get)
+        } else {
+            points.toList()
+        }
+        return Course(name, if (reverse) retained.asReversed() else retained)
     }
 
     @Synchronized
@@ -76,6 +87,17 @@ class TrackStore(context: Context) {
 
     @Synchronized
     fun pointCount(): Int = points.size
+
+    @Synchronized
+    fun recentPositions(maximumPoints: Int = 80): List<com.watchnav.core.GeoPoint> = points
+        .takeLast(maximumPoints.coerceAtLeast(2))
+        .map(CoursePoint::position)
+
+    @Synchronized
+    fun courseFrom(pointIndex: Int, name: String): Course? {
+        val retained = points.drop(pointIndex.coerceIn(0, points.size))
+        return retained.takeIf { it.size >= 2 }?.let { Course(name, it) }
+    }
 
     private fun loadExisting() {
         if (!trackFile.isFile) return

@@ -16,6 +16,6 @@
         <service
             android:name=".NavigationSessionService"
             android:exported="false"
-            android:foregroundServiceType="location|health" />
+            android:foregroundServiceType="location" />
     </application>
 </manifest>
