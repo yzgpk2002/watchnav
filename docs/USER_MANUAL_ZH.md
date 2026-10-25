@@ -2,6 +2,8 @@
 
 适用：手表 0.20.39、手机 0.20.26-companion。发布整理日期：2026-10-25。
 
+图片说明：界面基于历史真机截图，公开版本保留环形路线，其余地图圆点、非环形连线及具体起点名称经过演示化处理。随机演示标点和路径不对应真实位置或活动，不可用作实际导航。
+
 ## 1. 下载与准备
 
 到 [最新 Release](https://github.com/yzgpk2002/watchnav/releases/latest) 下载手机 APK、手表 APK，以及需要的地图资源。手机需要 Android 11 或以上、arm64；手表需要 Android 11 / API 30 或以上的 Wear OS，主要测试设备是 Galaxy Watch7。华为非 Wear OS 手表不能安装本 APK。
