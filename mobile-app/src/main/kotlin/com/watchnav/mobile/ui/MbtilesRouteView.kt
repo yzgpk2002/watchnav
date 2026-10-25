@@ -15,6 +15,7 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import com.watchnav.core.Course
+import com.watchnav.core.CoursePointRole
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -63,6 +64,10 @@ class MbtilesRouteView(context: Context, file: File, private val course: Course?
     }
     private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(34, 211, 238); style = Paint.Style.FILL
+    }
+    private val markerLabelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = resources.displayMetrics.density * 12f
+        setShadowLayer(3f, 0f, 1f, Color.BLACK)
     }
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
@@ -149,11 +154,15 @@ class MbtilesRouteView(context: Context, file: File, private val course: Course?
         val privateRadius = resources.displayMetrics.density * 5f
         val publicRadius = resources.displayMetrics.density * 3f
         course.landmarks.forEach { point ->
+            if (point.role == CoursePointRole.SHAPING) return@forEach
             val isPublicFacility = point.type == "synced-public"
             if (isPublicFacility && zoom < 14) return@forEach
             val x = (lonToWorld(point.position.longitude, zoom) - left).toFloat()
             val y = (latToWorld(point.position.latitude, zoom) - top).toFloat()
             canvas.drawCircle(x, y, if (isPublicFacility) publicRadius else privateRadius, markerPaint)
+            if (zoom >= 14) point.name?.take(18)?.let { name ->
+                canvas.drawText(name, x + privateRadius + resources.displayMetrics.density * 3f, y - privateRadius, markerLabelPaint)
+            }
         }
     }
 

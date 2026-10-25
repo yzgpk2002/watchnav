@@ -286,4 +286,5 @@
     <string name="route_point_count">%1$d points</string>
     <string name="route_start_distance">Start %1$.1f km</string>
     <string name="exit_application">Exit app completely</string>
+    <string name="deviation_distance">Off route %1$.0f m</string>
 </resources>

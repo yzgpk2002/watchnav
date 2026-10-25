@@ -14,7 +14,10 @@ import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import kotlin.math.abs
 
-internal class OutdoorSensorFusion(context: Context) : SensorEventListener {
+internal class OutdoorSensorFusion(
+    context: Context,
+    private val onStepCountChanged: ((Long) -> Unit)? = null,
+) : SensorEventListener {
     private val applicationContext = context.applicationContext
     private val sensorManager = context.getSystemService(SensorManager::class.java)
     private val pressureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
@@ -35,8 +38,7 @@ internal class OutdoorSensorFusion(context: Context) : SensorEventListener {
     @Suppress("DEPRECATION")
     private val displayRotation = context.getSystemService(WindowManager::class.java).defaultDisplay.rotation
     private var pressureAltitudeMeters: Double? = null
-    private var altitudeOffsetMeters = 0.0
-    private var hasAltitudeCalibration = false
+    private val altitudeEstimator = TerrainAwareAltitudeEstimator()
     private var fusedAltitudeMeters: Double? = null
     private var previousAltitudeMeters: Double? = null
     private var previousAltitudeTimeNanos: Long? = null
@@ -101,17 +103,19 @@ internal class OutdoorSensorFusion(context: Context) : SensorEventListener {
         sensorManager.unregisterListener(this)
     }
 
-    fun updateGnssAltitude(altitudeMeters: Double?): Double? {
-        if (altitudeMeters != null && pressureAltitudeMeters != null) {
-            val measuredOffset = altitudeMeters - requireNotNull(pressureAltitudeMeters)
-            altitudeOffsetMeters = if (hasAltitudeCalibration) {
-                altitudeOffsetMeters * 0.98 + measuredOffset * 0.02
-            } else {
-                measuredOffset
-            }
-            hasAltitudeCalibration = true
-        }
-        fusedAltitudeMeters = pressureAltitudeMeters?.plus(altitudeOffsetMeters) ?: altitudeMeters
+    fun updateGnssAltitude(
+        altitudeMeters: Double?,
+        terrainAltitudeMeters: Double? = null,
+        terrainRoughnessMeters: Double? = null,
+        verticalAccuracyMeters: Double? = null,
+    ): Double? {
+        fusedAltitudeMeters = altitudeEstimator.update(
+            pressureAltitudeMeters = pressureAltitudeMeters,
+            gnssAltitudeMeters = altitudeMeters,
+            terrainAltitudeMeters = terrainAltitudeMeters,
+            terrainRoughnessMeters = terrainRoughnessMeters,
+            gnssVerticalAccuracyMeters = verticalAccuracyMeters,
+        )?.altitudeMeters ?: altitudeMeters
         return fusedAltitudeMeters
     }
 
@@ -137,9 +141,16 @@ internal class OutdoorSensorFusion(context: Context) : SensorEventListener {
                     event.values[0],
                 ).toDouble()
                 pressureAltitudeMeters = altitude
-                val fused = altitude + altitudeOffsetMeters
-                updateVerticalSpeed(fused, event.timestamp)
-                fusedAltitudeMeters = fused
+                val fused = altitudeEstimator.update(
+                    pressureAltitudeMeters = altitude,
+                    gnssAltitudeMeters = null,
+                    terrainAltitudeMeters = null,
+                    terrainRoughnessMeters = null,
+                )?.altitudeMeters
+                if (fused != null) {
+                    updateVerticalSpeed(fused, event.timestamp)
+                    fusedAltitudeMeters = fused
+                }
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
                 compassAccuracy = event.accuracy
@@ -158,11 +169,18 @@ internal class OutdoorSensorFusion(context: Context) : SensorEventListener {
                 hasGeomagnetic = true
                 updateRawTiltCompensatedCompass()
             }
-            Sensor.TYPE_STEP_DETECTOR -> detectedStepCount++
+            Sensor.TYPE_STEP_DETECTOR -> {
+                detectedStepCount++
+                onStepCountChanged?.invoke(detectedStepCount)
+            }
             Sensor.TYPE_STEP_COUNTER -> {
                 val systemCount = event.values.firstOrNull()?.toLong() ?: return
                 val initial = initialSystemStepCount ?: systemCount.also { initialSystemStepCount = it }
-                detectedStepCount = (systemCount - initial).coerceAtLeast(0L)
+                val updatedCount = (systemCount - initial).coerceAtLeast(0L)
+                if (updatedCount != detectedStepCount) {
+                    detectedStepCount = updatedCount
+                    onStepCountChanged?.invoke(updatedCount)
+                }
             }
         }
     }

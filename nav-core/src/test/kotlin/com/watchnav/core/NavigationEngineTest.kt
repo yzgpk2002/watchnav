@@ -84,6 +84,37 @@ class NavigationEngineTest {
         assertTrue(update.match.remainingMeters > 0.0)
     }
 
+    @Test
+    fun viaPointIsUpAheadAndShapingPointStaysSilent() {
+        val semanticCourse = Course(
+            name = "Milestones",
+            points = listOf(
+                CoursePoint(GeoPoint(31.0000, 121.0000)),
+                CoursePoint(GeoPoint(31.0010, 121.0000), name = "塑形", type = "shaping", role = CoursePointRole.SHAPING),
+                CoursePoint(GeoPoint(31.0020, 121.0000), name = "补给", type = "via", role = CoursePointRole.VIA),
+                CoursePoint(GeoPoint(31.0030, 121.0000)),
+            ),
+        )
+        val engine = NavigationEngine(semanticCourse, ActivityMode.HIKE)
+
+        val update = engine.update(fix(31.0002, 121.0, 1))
+
+        assertEquals("补给", update.nextMilestone?.point?.name)
+        assertTrue(update.distanceToNextMilestoneMeters!! > 0.0)
+    }
+
+    @Test
+    fun accuracyNormalisedInnovationContributesToOffCourseDecision() {
+        val engine = NavigationEngine(course, ActivityMode.HIKE)
+        val first = engine.update(fix(31.0005, 121.00024, 1))
+        val second = engine.update(fix(31.0006, 121.00024, 2))
+        val third = engine.update(fix(31.0007, 121.00024, 3))
+
+        assertTrue(first.match.innovationSquared > 9.0)
+        assertEquals(CourseAdherence.SUSPECTED_OFF_COURSE, second.adherence.state)
+        assertEquals(CourseAdherence.OFF_COURSE, third.adherence.state)
+    }
+
     private fun fix(lat: Double, lon: Double, second: Long) = LocationFix(
         position = GeoPoint(lat, lon),
         accuracyMeters = 5.0,

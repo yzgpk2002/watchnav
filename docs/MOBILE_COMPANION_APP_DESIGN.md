@@ -2,7 +2,7 @@
 
 版本：1.2
 
-适用基线：WatchNav Wear OS 0.20.35 / Android Companion 0.20.26
+适用基线：WatchNav Wear OS 0.20.36 / Android Companion 0.20.26
 
 目标平台：Android 手机 + Wear OS 手表
 

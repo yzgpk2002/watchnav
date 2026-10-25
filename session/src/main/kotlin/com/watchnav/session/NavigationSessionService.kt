@@ -12,11 +12,14 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -51,6 +54,8 @@ class NavigationSessionService : Service(), LocationListener {
     private lateinit var sensorFusion: OutdoorSensorFusion
     private val navigationFilter = AdaptiveNavigationFilter()
     private val pedestrianDirectionEstimator = PedestrianRouteDirectionEstimator()
+    private val pedestrianDeadReckoner = PedestrianDeadReckoner()
+    private var lastGnssElapsedRealtimeMillis = 0L
     private var healthExercise: HealthExerciseController? = null
     private lateinit var lastFixStore: LastNavigationFixStore
     private var engine: NavigationEngine? = null
@@ -59,7 +64,6 @@ class NavigationSessionService : Service(), LocationListener {
     private var currentMode: ActivityMode = ActivityMode.HIKE
     private var powerMode: NavigationPowerMode = NavigationPowerMode.BALANCED
     private var lastNotificationMillis = 0L
-    private var lastAlertKey: String? = null
     private var lastClimbAlertKey: String? = null
     private var explicitlyEndingExercise = false
     private var stopping = false
@@ -71,12 +75,16 @@ class NavigationSessionService : Service(), LocationListener {
     private var explorationMode = false
     private var explorationName = "Free exploration"
     private var finishArrivalDetector: FinishArrivalDetector? = null
+    private var destinationPosition: GeoPoint? = null
+    private var deviationTone: ToneGenerator? = null
+    private var deviationAlarmActive = false
+    private var lastDeviationAlarmMillis = 0L
 
     override fun onCreate() {
         super.onCreate()
         store = SessionStore(this)
         trackStore = TrackStore(this)
-        sensorFusion = OutdoorSensorFusion(this).also(OutdoorSensorFusion::start)
+        sensorFusion = OutdoorSensorFusion(this, ::onPdrStepCountChanged).also(OutdoorSensorFusion::start)
         healthExercise = runCatching { HealthExerciseController(this) }.getOrNull()
         lastFixStore = LastNavigationFixStore(this)
         locationManager = getSystemService(LocationManager::class.java)
@@ -118,20 +126,18 @@ class NavigationSessionService : Service(), LocationListener {
 
     override fun onLocationChanged(location: Location) {
         runCatching {
-            val fusedElevation = sensorFusion.updateGnssAltitude(
-                location.altitude.takeIf { location.hasAltitude() },
-            )
+            val rawElevation = location.altitude.takeIf { location.hasAltitude() }
             sensorFusion.updateGeomagneticReference(
                 location.latitude,
                 location.longitude,
-                fusedElevation,
+                rawElevation,
                 location.time.takeIf { it > 0 } ?: System.currentTimeMillis(),
             )
             val rawFix = LocationFix(
                 position = GeoPoint(
                     latitude = location.latitude,
                     longitude = location.longitude,
-                    elevationMeters = fusedElevation,
+                    elevationMeters = rawElevation,
                 ),
                 accuracyMeters = location.accuracy.toDouble().takeIf { location.hasAccuracy() } ?: 50.0,
                 timestampMillis = location.time.takeIf { it > 0 } ?: System.currentTimeMillis(),
@@ -143,6 +149,8 @@ class NavigationSessionService : Service(), LocationListener {
                 sensorFusion.compassBearingDegrees,
                 sensorFusion.compassReliable,
             )
+            lastGnssElapsedRealtimeMillis = SystemClock.elapsedRealtime()
+            pedestrianDeadReckoner.anchor(fix, sensorFusion.detectedStepCount)
             lastFixStore.save(fix)
             if (explorationMode) {
                 processExplorationFix(fix)
@@ -158,10 +166,17 @@ class NavigationSessionService : Service(), LocationListener {
         fix: LocationFix,
         recordTrack: Boolean,
         fallbackMessage: String?,
+        trustedForTopology: Boolean = true,
     ) {
         val navigationEngine = engine ?: return
+        val update = navigationEngine.update(fix)
+        val profile = elevationProfile
+        val terrainElevation = profile?.elevationAt(update.match.stableProgressMeters)
+        val terrainRoughness = profile?.terrainRoughnessMeters(update.match.stableProgressMeters)
         val fusedElevation = sensorFusion.updateGnssAltitude(
             fix.position.elevationMeters,
+            terrainAltitudeMeters = terrainElevation,
+            terrainRoughnessMeters = terrainRoughness,
         )
         val normalizedFix = fix.copy(
             position = fix.position.copy(elevationMeters = fusedElevation ?: fix.position.elevationMeters),
@@ -169,13 +184,15 @@ class NavigationSessionService : Service(), LocationListener {
         )
         val health = healthExercise?.metrics ?: HealthExerciseMetrics()
         if (recordTrack && !health.paused) trackStore.record(normalizedFix)
-        val update = navigationEngine.update(normalizedFix)
         val approachThreshold = max(
             APPROACH_GUIDANCE_MINIMUM_DISTANCE_METERS,
             normalizedFix.accuracyMeters * APPROACH_GUIDANCE_ACCURACY_FACTOR,
         )
         val approachActive = update.match.crossTrackDistanceMeters > approachThreshold
-        val arrivedAtFinish = finishArrivalDetector?.update(normalizedFix) == true
+        val arrivedAtFinish = trustedForTopology && finishArrivalDetector?.update(
+            normalizedFix,
+            trackStore.recordedDistanceMeters(),
+        ) == true
         val displayedRemainingMeters = update.match.remainingMeters +
             update.match.crossTrackDistanceMeters.takeIf { approachActive }.orZero()
         val effectiveRemainingMeters = if (arrivedAtFinish) 0.0 else displayedRemainingMeters
@@ -209,12 +226,6 @@ class NavigationSessionService : Service(), LocationListener {
             normalizedFix.speedMetersPerSecond,
             directedPathHeading,
         )
-        val approachManeuver = if (approachActive) {
-            approachManeuver(normalizedFix.copy(bearingDegrees = guidanceHeading), update.match.snappedPosition)
-        } else {
-            null
-        }
-        val profile = elevationProfile
         val climbProgress = profile?.nextClimb(update.match.stableProgressMeters)
         val climbNumber = climbProgress?.let { profile.climbs.indexOf(it.climb) + 1 }
         val phase = when {
@@ -242,18 +253,28 @@ class NavigationSessionService : Service(), LocationListener {
             ),
             gradePercent = profile?.gradePercentAt(update.match.stableProgressMeters),
             verticalSpeedMetersPerHour = sensorFusion.verticalSpeedMetersPerHour,
-            nextManeuver = if (arrivedAtFinish) ManeuverKind.FINISH else TurnDisplayPolicy.resolve(
-                approachManeuver,
-                update.nextCue?.kind,
-                update.distanceToNextCueMeters,
-            ),
-            distanceToNextManeuverMeters = if (arrivedAtFinish) {
-                0.0
-            } else if (approachActive) {
-                update.match.crossTrackDistanceMeters
-            } else {
-                update.distanceToNextCueMeters
+            // Walking navigation relies on the route geometry and cross-track alarm. Short GNSS
+            // baselines made left/straight/right cues unstable and misleading on the watch.
+            nextManeuver = null,
+            nextManeuverLabel = null,
+            distanceToNextManeuverMeters = null,
+            upAheadPoint = update.nextMilestone?.point,
+            distanceToUpAheadMeters = update.distanceToNextMilestoneMeters,
+            upAheadEtaMillis = update.nextMilestone?.let { milestone ->
+                val terrainSeconds = profile?.estimatedTravelTimeSeconds(
+                    update.match.stableProgressMeters,
+                    milestone.distanceFromStartMeters,
+                )
+                val fallbackSeconds = update.distanceToNextMilestoneMeters?.let { distance ->
+                    distance / max(normalizedFix.speedMetersPerSecond ?: 0.0, 0.8)
+                }
+                (terrainSeconds ?: fallbackSeconds)?.let { seconds ->
+                    normalizedFix.timestampMillis + (seconds * 1_000).toLong()
+                }
             },
+            routeEtaMillis = profile?.estimatedTravelTimeSeconds(
+                update.match.stableProgressMeters,
+            )?.let { seconds -> normalizedFix.timestampMillis + (seconds * 1_000).toLong() },
             adherence = update.adherence.state,
             totalAscentMeters = profile?.totalAscentMeters ?: 0.0,
             remainingAscentMeters = profile?.remainingAscentMeters(
@@ -285,13 +306,16 @@ class NavigationSessionService : Service(), LocationListener {
             completeSession(telemetry)
             return
         }
-        dispatchHapticAlert(update, normalizedFix.speedMetersPerSecond)
+        if (trustedForTopology) {
+            dispatchHapticAlert(update)
+            dispatchDeviationAlarm(update.match.crossTrackDistanceMeters)
+        }
         dispatchClimbAlert(climbNumber, climbProgress?.active, climbProgress?.distanceToStartMeters)
         val automaticRejoinThreshold = max(
             AUTOMATIC_REROUTE_MINIMUM_DISTANCE_METERS,
             normalizedFix.accuracyMeters * AUTOMATIC_REROUTE_ACCURACY_FACTOR,
         )
-        if (recordTrack && !arrivedAtFinish &&
+        if (trustedForTopology && recordTrack && !arrivedAtFinish &&
             finishArrivalDetector?.isInsideRerouteProtection(normalizedFix) != true &&
             update.match.crossTrackDistanceMeters >= automaticRejoinThreshold &&
             normalizedFix.timestampMillis - lastAutomaticRerouteMillis >= AUTOMATIC_REROUTE_COOLDOWN_MILLIS &&
@@ -301,6 +325,24 @@ class NavigationSessionService : Service(), LocationListener {
             calculateRejoinRoute(normalizedFix, update)
         }
         updateNotificationIfNeeded(telemetry, update.adherence.changed)
+    }
+
+    private fun onPdrStepCountChanged(stepCount: Long) {
+        if (stopping || explorationMode || engine == null) return
+        val elapsedSinceGnss = SystemClock.elapsedRealtime() - lastGnssElapsedRealtimeMillis
+        val blindThreshold = max(PDR_MINIMUM_GNSS_GAP_MILLIS, powerMode.locationIntervalMillis * 2)
+        if (lastGnssElapsedRealtimeMillis == 0L || elapsedSinceGnss < blindThreshold) return
+        val heading = NavigationStateHub.current.bearingDegrees
+            ?: sensorFusion.compassBearingDegrees?.takeIf { sensorFusion.compassReliable }
+            ?: return
+        pedestrianDeadReckoner.advance(stepCount, heading, System.currentTimeMillis())?.let { fix ->
+            processFix(
+                fix = fix,
+                recordTrack = true,
+                fallbackMessage = "GNSS blind area · step guidance",
+                trustedForTopology = false,
+            )
+        }
     }
 
     /**
@@ -328,6 +370,8 @@ class NavigationSessionService : Service(), LocationListener {
     }
 
     private fun finishCompletedSession() {
+        CourseFileStore(this).clearNavigationTarget()
+        releaseDeviationAlarm()
         engine = null
         elevationProfile = null
         store.clear()
@@ -336,18 +380,22 @@ class NavigationSessionService : Service(), LocationListener {
     }
 
     private fun processExplorationFix(fix: LocationFix) {
-        trackStore.record(fix)
+        val fusedElevation = sensorFusion.updateGnssAltitude(fix.position.elevationMeters)
+        val normalizedFix = fix.copy(
+            position = fix.position.copy(elevationMeters = fusedElevation ?: fix.position.elevationMeters),
+        )
+        trackStore.record(normalizedFix)
         val telemetry = NavigationTelemetry(
             phase = SessionPhase.NAVIGATING,
             courseName = explorationName,
-            position = fix.position,
+            position = normalizedFix.position,
             breadcrumbTrail = trackStore.recentPositions(),
-            horizontalAccuracyMeters = fix.accuracyMeters,
-            speedMetersPerSecond = fix.speedMetersPerSecond,
-            bearingDegrees = fix.bearingDegrees,
+            horizontalAccuracyMeters = normalizedFix.accuracyMeters,
+            speedMetersPerSecond = normalizedFix.speedMetersPerSecond,
+            bearingDegrees = normalizedFix.bearingDegrees,
             compassCalibrationNeeded = sensorFusion.compassNeedsCalibration,
             recordedPointCount = trackStore.pointCount(),
-            updatedAtMillis = fix.timestampMillis,
+            updatedAtMillis = normalizedFix.timestampMillis,
             message = "Free exploration",
         )
         NavigationStateHub.publish(telemetry)
@@ -370,6 +418,7 @@ class NavigationSessionService : Service(), LocationListener {
         if (!explicitlyEndingExercise) healthExercise?.detach()
         archiveExecutor.shutdown()
         routingExecutor.shutdown()
+        releaseDeviationAlarm()
         engine = null
         elevationProfile = null
         super.onDestroy()
@@ -390,7 +439,8 @@ class NavigationSessionService : Service(), LocationListener {
         )
         NavigationStateHub.publish(NavigationTelemetry(phase = SessionPhase.LOADING_COURSE))
         try {
-            val storedCourse = CourseFileStore(this).load()
+            val courseFileStore = CourseFileStore(this)
+            val storedCourse = courseFileStore.load()
                 ?: error("Import or download a GPX course first")
             courseName = storedCourse.course.name
             val restoredSnapshot = store.load()
@@ -403,11 +453,25 @@ class NavigationSessionService : Service(), LocationListener {
             if (resetRecording) trackStore.startNew()
             if (resetRecording) navigationFilter.reset()
             if (resetRecording) pedestrianDirectionEstimator.reset()
-            finishArrivalDetector = FinishArrivalDetector(storedCourse.course.points.last().position).also { detector ->
+            val sourceCourse = runCatching { courseFileStore.loadNavigationSource()?.course }.getOrNull()
+                ?.takeIf { source -> sameCourseName(source.name, storedCourse.course.name) }
+            val approachTarget = courseFileStore.loadNavigationTarget()
+            destinationPosition = approachTarget
+                ?: (sourceCourse ?: storedCourse.course).points.last().position
+            finishArrivalDetector = FinishArrivalDetector(requireNotNull(destinationPosition)).also { detector ->
                 if (!resetRecording) {
                     trackStore.recentPositions().forEach(detector::observeHistoricalPosition)
                 }
             }
+            Log.i(
+                TAG,
+                "Finish target=${destinationPosition?.latitude},${destinationPosition?.longitude} " +
+                    "source=${when {
+                        approachTarget != null -> "approach-start"
+                        sourceCourse != null -> "original-finish"
+                        else -> "active-finish"
+                    }}",
+            )
             // Navigation already owns the GNSS stream. A parallel Health Services exercise kept
             // heart-rate/GNSS hardware active for hours and provided no guidance benefit.
             healthExercise?.detach()
@@ -456,7 +520,6 @@ class NavigationSessionService : Service(), LocationListener {
         }
         CourseFileStore(this).saveCourse(returnCourse)
         store.clear()
-        lastAlertKey = null
         lastClimbAlertKey = null
         startOrRestoreSession(ActivityMode.HIKE, powerMode, resetRecording = false)
     }
@@ -473,11 +536,9 @@ class NavigationSessionService : Service(), LocationListener {
         }
         locationManager.removeUpdates(this)
         bestLastKnownLocation()?.let { location ->
-            val fusedElevation = sensorFusion.updateGnssAltitude(
-                location.altitude.takeIf { location.hasAltitude() },
-            )
+            val rawElevation = location.altitude.takeIf { location.hasAltitude() }
             val fix = LocationFix(
-                GeoPoint(location.latitude, location.longitude, fusedElevation),
+                GeoPoint(location.latitude, location.longitude, rawElevation),
                 location.accuracy.toDouble().takeIf { location.hasAccuracy() } ?: 100.0,
                 location.time.takeIf { it > 0 } ?: System.currentTimeMillis(),
                 location.bearing.toDouble().takeIf { location.hasBearing() },
@@ -499,22 +560,12 @@ class NavigationSessionService : Service(), LocationListener {
         )
     }
 
-    private fun approachManeuver(fix: LocationFix, target: GeoPoint): ManeuverKind {
-        val heading = fix.bearingDegrees ?: return ManeuverKind.START
-        val targetBearing = GeoMath.initialBearingDegrees(fix.position, target)
-        val turn = GeoMath.signedTurnDegrees(heading, targetBearing)
-        return when {
-            turn <= -APPROACH_TURN_THRESHOLD_DEGREES -> ManeuverKind.LEFT
-            turn >= APPROACH_TURN_THRESHOLD_DEGREES -> ManeuverKind.RIGHT
-            else -> ManeuverKind.START
-        }
-    }
-
     private fun startExplorationSession(name: String, resetRecording: Boolean) {
         stopping = false
         explorationMode = true
         explorationName = name
         finishArrivalDetector = null
+        destinationPosition = null
         engine = null
         elevationProfile = null
         courseName = name
@@ -637,7 +688,7 @@ class NavigationSessionService : Service(), LocationListener {
         }
     }
 
-    private fun dispatchHapticAlert(update: NavigationUpdate, speedMetersPerSecond: Double?) {
+    private fun dispatchHapticAlert(update: NavigationUpdate) {
         val now = System.currentTimeMillis()
         if (update.adherence.changed && now - lastAdherenceAlertMillis >= ADHERENCE_ALERT_COOLDOWN_MILLIS) {
             lastAdherenceAlertMillis = now
@@ -647,24 +698,34 @@ class NavigationSessionService : Service(), LocationListener {
                 else -> Unit
             }
         }
+    }
 
-        val cue = update.nextCue ?: return
-        val distance = update.distanceToNextCueMeters ?: return
-        val speed = max(speedMetersPerSecond ?: 1.4, 0.5)
-        val stage = when {
-            distance <= max(25.0, speed * 5.0) -> "now"
-            distance <= max(80.0, speed * 20.0) -> "near"
-            distance <= max(250.0, speed * 60.0) -> "preview"
-            else -> return
+    /** Audible warning is deliberately independent of turn cues: walking turn estimates were
+     * noisy, while a sustained 60 m cross-track error is actionable and safety relevant. */
+    private fun dispatchDeviationAlarm(crossTrackMeters: Double) {
+        if (crossTrackMeters <= DEVIATION_ALARM_RESET_METERS) {
+            deviationAlarmActive = false
+            return
         }
-        val key = "${cue.pointIndex}:$stage"
-        if (key == lastAlertKey) return
-        lastAlertKey = key
-        when (stage) {
-            "now" -> vibrate(longArrayOf(0, 220, 100, 220))
-            "near" -> vibrate(longArrayOf(0, 150, 100, 150))
-            else -> vibrate(longArrayOf(0, 120))
-        }
+        if (crossTrackMeters <= DEVIATION_ALARM_METERS) return
+        val now = System.currentTimeMillis()
+        if (deviationAlarmActive && now - lastDeviationAlarmMillis < DEVIATION_ALARM_REPEAT_MILLIS) return
+        deviationAlarmActive = true
+        lastDeviationAlarmMillis = now
+        runCatching {
+            val tone = deviationTone ?: ToneGenerator(AudioManager.STREAM_ALARM, 90).also {
+                deviationTone = it
+            }
+            tone.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, DEVIATION_TONE_DURATION_MILLIS)
+        }.onFailure { Log.w(TAG, "Unable to play deviation alert", it) }
+        vibrate(longArrayOf(0, 300, 120, 300, 120, 500))
+    }
+
+    private fun releaseDeviationAlarm() {
+        deviationAlarmActive = false
+        deviationTone?.stopTone()
+        deviationTone?.release()
+        deviationTone = null
     }
 
     private fun dispatchClimbAlert(number: Int?, active: Boolean?, distanceToStartMeters: Double?) {
@@ -738,6 +799,7 @@ class NavigationSessionService : Service(), LocationListener {
         }
         explorationPreferences().edit().clear().apply()
         explorationMode = false
+        releaseDeviationAlarm()
         engine = null
         elevationProfile = null
         store.clear()
@@ -750,9 +812,9 @@ class NavigationSessionService : Service(), LocationListener {
         getSharedPreferences(EXPLORATION_PREFERENCES, Context.MODE_PRIVATE)
 
     private fun finishStopSession() {
+        releaseDeviationAlarm()
         engine = null
         elevationProfile = null
-        lastAlertKey = null
         lastClimbAlertKey = null
         store.clear()
         NavigationStateHub.publish(NavigationTelemetry())
@@ -772,6 +834,12 @@ class NavigationSessionService : Service(), LocationListener {
             buildNotification(courseName, 0.0, null, SessionPhase.ERROR, message),
         )
     }
+
+    private fun sameCourseName(first: String, second: String): Boolean =
+        first.trim().replace(Regex("\\s+"), " ").equals(
+            second.trim().replace(Regex("\\s+"), " "),
+            ignoreCase = true,
+        )
 
     private fun buildNotification(
         courseName: String,
@@ -878,6 +946,10 @@ class NavigationSessionService : Service(), LocationListener {
         private const val AUTOMATIC_REROUTE_ACCURACY_FACTOR = 1.5
         private const val AUTOMATIC_REROUTE_COOLDOWN_MILLIS = 5 * 60_000L
         private const val ADHERENCE_ALERT_COOLDOWN_MILLIS = 2 * 60_000L
+        private const val DEVIATION_ALARM_METERS = 60.0
+        private const val DEVIATION_ALARM_RESET_METERS = 45.0
+        private const val DEVIATION_ALARM_REPEAT_MILLIS = 60_000L
+        private const val DEVIATION_TONE_DURATION_MILLIS = 1_500
         private const val EXPLORATION_SIMPLIFICATION_METERS = 3.0
         private const val EXPLORATION_PREFERENCES = "free_exploration"
         private const val KEY_EXPLORATION_ACTIVE = "active"
@@ -885,7 +957,7 @@ class NavigationSessionService : Service(), LocationListener {
         private const val TRACKBACK_SIMPLIFICATION_METERS = 5.0
         private const val APPROACH_GUIDANCE_MINIMUM_DISTANCE_METERS = 8.0
         private const val APPROACH_GUIDANCE_ACCURACY_FACTOR = 0.5
-        private const val APPROACH_TURN_THRESHOLD_DEGREES = 25.0
+        private const val PDR_MINIMUM_GNSS_GAP_MILLIS = 20_000L
 
         fun start(
             context: Context,

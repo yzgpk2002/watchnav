@@ -16,13 +16,15 @@ internal class FinishArrivalDetector(private val finish: GeoPoint) {
         }
     }
 
-    fun update(fix: LocationFix): Boolean {
+    fun update(fix: LocationFix, travelledDistanceMeters: Double = 0.0): Boolean {
         val distance = GeoMath.distanceMeters(fix.position, finish)
         val departureRadius = max(
             MINIMUM_DEPARTURE_RADIUS_METERS,
             fix.accuracyMeters * DEPARTURE_ACCURACY_FACTOR,
         ).coerceAtMost(MAXIMUM_DEPARTURE_RADIUS_METERS)
-        if (distance >= departureRadius) departedFinishArea = true
+        if (distance >= departureRadius || travelledDistanceMeters >= MINIMUM_JOURNEY_DISTANCE_METERS) {
+            departedFinishArea = true
+        }
 
         val arrivalRadius = max(
             MINIMUM_ARRIVAL_RADIUS_METERS,
@@ -41,9 +43,13 @@ internal class FinishArrivalDetector(private val finish: GeoPoint) {
     }
 
     private companion object {
-        const val MINIMUM_DEPARTURE_RADIUS_METERS = 300.0
-        const val MAXIMUM_DEPARTURE_RADIUS_METERS = 500.0
-        const val DEPARTURE_ACCURACY_FACTOR = 5.0
+        // A 300 m arming radius prevented short loops and off-route shortcuts from ever completing.
+        // 75 m remains well outside ordinary watch GNSS drift, while cumulative travelled distance
+        // provides a second safe arming path when the whole activity stays close to the finish.
+        const val MINIMUM_DEPARTURE_RADIUS_METERS = 75.0
+        const val MAXIMUM_DEPARTURE_RADIUS_METERS = 200.0
+        const val DEPARTURE_ACCURACY_FACTOR = 2.0
+        const val MINIMUM_JOURNEY_DISTANCE_METERS = 300.0
         const val MINIMUM_ARRIVAL_RADIUS_METERS = 35.0
         const val MAXIMUM_ARRIVAL_RADIUS_METERS = 150.0
         const val ARRIVAL_ACCURACY_FACTOR = 3.5

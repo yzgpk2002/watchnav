@@ -9,6 +9,7 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import com.watchnav.core.Course
+import com.watchnav.core.CoursePointRole
 import com.watchnav.mapsforge.MapsforgeMapRepository
 import com.watchnav.mapsforge.OfflineMapsforgeView
 import com.watchnav.mobile.R
@@ -181,7 +182,7 @@ private class OnlineCourseMapView(context: Context) : FrameLayout(context) {
                 stroke(255, 255, 255, 2f),
             ).also(mapView.layerManager.layers::add)
         }
-        course.landmarks.forEach { point ->
+        course.landmarks.filterNot { it.role == CoursePointRole.SHAPING }.forEach { point ->
             markerLayers += Circle(
                 LatLong(point.position.latitude, point.position.longitude),
                 7f,

@@ -2,7 +2,7 @@
 
 文档版本：1.0
 
-基线：Wear OS `0.20.35` / Android Companion `0.20.26-companion`
+基线：Wear OS `0.20.39` / Android Companion `0.20.26-companion`
 
 更新日期：2026-08-17
 
@@ -70,17 +70,19 @@ flowchart LR
 纯 Kotlin 导航内核，不依赖 Android UI：
 
 - `GeoPoint`、球面距离、初始方位角和坐标换算。
-- GPX/KML 解析与写出，禁用 XML 外部实体；支持航点和路线扩展。
+- GPX/KML 流式解析与写出，禁用 XML 外部实体；对扩展文本、链接和航点数量设硬上限。
+- GPX 语义层保留 Waypoint、Via/Shaping、显式转向、地址电话链接、路面限速、传感器和 OsmAnd 样式。
 - WGS-84、GCJ-02、BD-09 相互转换，所有内部导航数据归一为 WGS-84。
 - 路线分段、累计里程、空间索引、匹配、转向点生成和偏航状态。
-- 海拔剖面、坡度、累计爬升和路线简化。
-- `CourseMatcher` 保存稳定进度，避免相邻/重叠路线段导致进度反跳。
+- 海拔剖面、坡度、累计爬升、地形粗糙度、Tobler/Naismith ETA 和路线简化。
+- `CourseMatcher` 使用高斯发射概率和距离轴转移概率的轻量 HMM，保存稳定进度并输出分叉置信度与标准化创新量。
 
 ### 3.2 `brouter-engine` 与 `routing-api`
 
 - `routing-api` 定义与 UI 无关的 `RouteRequest`、`RouteResult` 和 profile。
 - `brouter-engine` 嵌入 BRouter，读取 5°×5° `.rd5` 离线路网。
 - 默认按步行 profile 规划，不套用机动车通行逻辑。
+- 山地徒步 profile 强制开启高程代价并提高已知徒步路线权重；依赖 BRouter 线性近似和 64 MiB 内存上限，适配手表端算力。
 - 起终点先生成多个候选投影，综合路网距离、目标方向和明显反向惩罚，减少隔墙或错误入口直连。
 - 当前定位不在路线时，先规划到合适的路线接入点；偏航后只生成临时接驳段，不修改路线库中的原始路线。
 
@@ -110,7 +112,9 @@ flowchart LR
 - `NavigationSessionService`：前台定位、路线匹配、提示、偏航重算、活动记录和完成状态。
 - `AdaptiveNavigationFilter`：二维位置/速度滤波、低速航向融合、位置死区与航向滞回。
 - `OutdoorSensorFusion`：旋转向量、地磁真北修正、气压高度和垂直速度。
+- `TerrainAwareAltitudeEstimator`：气压计/GNSS/路线 DEM 三源误差状态融合，估计气压零偏，并按局部地形粗糙度动态修改 DEM 协方差。
 - `PedestrianRouteDirectionEstimator`：结合步数、沿线进度位移和罗盘，判断用户沿路线前进还是后退。
+- `PedestrianDeadReckoner`：GNSS 连续两个计划采样周期缺失后，以硬件步数和融合真北航向维持短时位置；不允许 PDR 轨迹单独触发终点完成或自动重规划。
 - `TrackStore` / `ActivityArchive`：采样轨迹、GPX/FIT/JSON 活动归档。
 - `FinishArrivalDetector`：独立于临时接驳路线进度的终点返回状态机。
 
@@ -132,15 +136,18 @@ sequenceDiagram
     participant GNSS as LocationManager
     participant Filter as AdaptiveNavigationFilter
     participant Session as NavigationSessionService
-    participant Match as NavigationEngine
+    participant Match as HMM/ForkTracker
+    participant Height as Altitude ESKF-lite
     participant UI as Map/Navigation UI
 
     GNSS->>Filter: 原始位置、精度、速度、COG
     Filter->>Filter: 位置/速度滤波 + 罗盘自适应融合
     Filter->>Session: 稳定 LocationFix
     Session->>Match: 路线匹配与进度更新
-    Match-->>Session: 吸附点、横向误差、剩余、下一转向
-    Session->>Session: 方向/终点/偏航状态机
+    Match-->>Session: 吸附点、创新量、分叉置信度、剩余
+    Session->>Height: 气压/GNSS/路线高程/地形粗糙度
+    Height-->>Session: 校准高程与不确定度
+    Session->>Session: 方向/终点/卡方偏航状态机
     Session-->>UI: NavigationTelemetry
     Session->>Session: 记录轨迹、更新通知、必要时重规划
 ```
@@ -155,6 +162,7 @@ sequenceDiagram
 - 位移航向需要至少 8–15 m 基线，并限制样本年龄，避免拿单次漂移判断行进方向。
 - 罗盘读数若与可信运动方向相差超过 `90°`，降低其权重并提示远离金属干扰。
 - 三星 Rotation Vector 已包含倾角补偿；在有经纬度和时间时再做磁偏角到真北的修正。
+- GNSS 超过 `max(20 s, 2×当前采样周期)` 未更新时才启用 PDR；每步按 0.72 m 推算并累计不确定度，GNSS 恢复后重新锚定，避免长期积分漂移。
 
 ### 4.2 前进/后退判定
 
@@ -167,28 +175,52 @@ sequenceDiagram
 
 ### 4.3 路线接入与偏航重规划
 
-1. 选中路线后，以当前定位为起点、路线合适接入点为终点运行步行规划。
-2. 接驳段与原始路线合并为本次活动路线，地图以紫色显示。
+1. 下载/导入的原始路线作为不可变导航源单独持久化；活动路线只保存本次定位生成的接驳结果。停止后重开或再次选择路线时，从最新可信定位重新计算，不能复用旧接驳段。
+2. 以当前定位为起点、路线合适接入点为终点运行步行规划；接驳段与原始路线去重拼接为单一连续距离轴，地图以紫色显示。
 3. 横向误差达到 `max(100 m, accuracy × 1.5)` 且超过 5 分钟冷却后才允许自动重规划。
-4. 临时重规划只服务当前会话；下载路线和优秀路线保持不可变。
-5. 重规划失败时继续显示真实位置、最后路线和到路线的面包屑连接，不清空导航 UI。
+4. 导航页不显示低速 GNSS 容易误判的左/直/右提示，只显示横向偏航距离；超过 `60 m` 时变红并发出周期性声音和振动，回到 `45 m` 内解除锁存。
+5. 边缘触控和旋转输入控制轻量路线缩放；全览范围由当前位置到路线首尾的最远距离决定，并把绘制点抽稀到最多 600 个，避免整条长 GPX 压垮手表渲染。
+6. 临时重规划只服务当前会话；下载路线和优秀路线保持不可变。
+7. 重规划失败时继续显示真实位置、最后路线和到路线的面包屑连接，不清空导航 UI。
 
-### 4.4 终点到达状态机
+山地匹配与预警在此基础上增加两层统计约束：
+
+- HMM 发射代价为 `d²/(2σd²)`，其中 `σd=max(5 m, GNSS accuracy)`；转移代价使用路线距离变化与大圆位移之差，`β=35 m`。
+- 当两个相隔至少 35 m 距离轴的候选分支负对数概率差小于 1.5 时标记为分叉不确定；此时偏航需要连续样本，但允许在 5 秒窗口内更快确认。
+- 标准化创新量超过二维 99% 卡方门限 `9.21034`，且横向距离超过动态门限的 70% 时，才把统计异常计入偏航，避免仅凭一个低精度点报警。
+
+### 4.4 山地高程与 ETA
+
+- 压力高度提供短期连续性，GNSS 提供绝对参考，GPX/DEM 提供地形参考；滤波状态同时维护高度和气压零偏。
+- 局部 200 m 窗口每 25 m 采样高程并计算标准差 `σT`。`σT<3 m` 的平坦区把 DEM 标准差放宽到 45 m；地形特征越明显，DEM 最低可收紧到 5 m。
+- 所有观测创新限制在 40 m/次，气压零偏每次最多按 8 m 的 4% 调整，避免天气突变或错误高程造成瞬移。
+- 路线高程与 GNSS 高程相差超过 150 m 时视为 GPX/DEM 异常并拒绝参与融合。
+- 徒步速度采用报告中的 `V=6·exp(-3.5·|dh/dx|)` km/h；ETA 在此基础上叠加 Naismith 累计爬升时间 `Δh/600 m·h⁻¹`。
+
+### 4.5 终点到达状态机
 
 旧实现只依赖当前 `NavigationEngine` 的剩余距离。自动重规划会用临时接驳路线替换引擎并把进度清零，造成用户已经到达却仍显示 1.2 km。
+
+终点判定还必须覆盖“完全未按规划路线走”的情况。路线选择采用两阶段语义：若用户不在 GPX 起点，第一阶段的独立目标固定为 GPX 第一个点，到达后归零并结束接驳；用户在起点再次启动，才进入沿完整 GPX 行走的第二阶段。不能把更近的中后段路线点偷偷替换为接驳目标。检测器满足以下任一启用条件后，只按真实空间距离判断到达：
+
+- 曾离开终点 `max(75 m, accuracy × 2)`，上限 200 m；
+- 实际记录轨迹累计超过 300 m。
+
+因此走捷径、平行道路或未匹配到路线距离轴，都不会阻止终点归零。若应用就在终点启动且没有真实移动，检测器仍保持未启用，避免立即误结束。
 
 新状态机独立保存原始路线终点：
 
 ```mermaid
 stateDiagram-v2
     [*] --> NearStart
-    NearStart --> Departed: 距终点 >= max(300m, accuracy*5)
+    NearStart --> Departed: 距终点 >= max(75m, accuracy*2)
+    NearStart --> Departed: 实际轨迹累计 >= 300m
     Departed --> Arrived: 距终点 <= max(35m, accuracy*3.5)
     Arrived --> Completed: 剩余=0、保存活动
     Completed --> [*]: 释放GNSS/传感器/前台服务
 ```
 
-- 离开半径限制在 300–500 m，到达半径限制在 35–150 m。
+- 离开半径限制在 75–200 m，到达半径限制在 35–150 m；实际轨迹累计 300 m 也可安全启用到达判定。
 - 恢复进程时用已保存轨迹重新建立“已经离开过终点”的事实。
 - 终点 200–300 m 范围内禁止自动接驳重规划。
 - 路线匹配进度超过 75% 后，另有 20–60 m 精细终点吸附。

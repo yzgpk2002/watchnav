@@ -1,5 +1,9 @@
 package com.watchnav.core
 
+import kotlin.math.exp
+import kotlin.math.pow
+import kotlin.math.sqrt
+
 data class ClimbSegment(
     val startPointIndex: Int,
     val endPointIndex: Int,
@@ -21,6 +25,7 @@ data class ClimbProgress(
 
 class ElevationProfile private constructor(
     val cumulativeAscentMeters: DoubleArray,
+    private val cumulativeTravelSeconds: DoubleArray,
     val climbs: List<ClimbSegment>,
     private val preparedCourse: PreparedCourse,
 ) {
@@ -45,6 +50,37 @@ class ElevationProfile private constructor(
         val startElevation = elevationAt(startDistance) ?: return null
         val endElevation = elevationAt(endDistance) ?: return null
         return (endElevation - startElevation) / (endDistance - startDistance) * 100.0
+    }
+
+    /** Standard deviation of the local terrain heights used to tune DEM observation noise. */
+    fun terrainRoughnessMeters(progressMeters: Double, windowMeters: Double = 200.0): Double? {
+        val halfWindow = windowMeters.coerceAtLeast(50.0) / 2.0
+        val start = (progressMeters - halfWindow).coerceAtLeast(0.0)
+        val end = (progressMeters + halfWindow).coerceAtMost(preparedCourse.totalDistanceMeters)
+        if (end <= start) return null
+        val samples = ArrayList<Double>()
+        var distance = start
+        while (distance < end) {
+            elevationAt(distance)?.let(samples::add)
+            distance += TERRAIN_SAMPLE_SPACING_METERS
+        }
+        elevationAt(end)?.let(samples::add)
+        if (samples.size < 2) return null
+        val mean = samples.average()
+        return sqrt(samples.sumOf { (it - mean).pow(2) } / samples.size)
+    }
+
+    /**
+     * Terrain-aware ETA based on Tobler walking speed plus Naismith's ascent allowance.
+     * Returned seconds are deterministic and usable without network or live speed data.
+     */
+    fun estimatedTravelTimeSeconds(
+        startProgressMeters: Double,
+        endProgressMeters: Double = preparedCourse.totalDistanceMeters,
+    ): Double {
+        val start = startProgressMeters.coerceIn(0.0, preparedCourse.totalDistanceMeters)
+        val end = endProgressMeters.coerceIn(start, preparedCourse.totalDistanceMeters)
+        return (travelSecondsAt(end) - travelSecondsAt(start)).coerceAtLeast(0.0)
     }
 
     fun nextClimb(progressMeters: Double): ClimbProgress? {
@@ -73,6 +109,13 @@ class ElevationProfile private constructor(
             (cumulativeAscentMeters[low + 1] - cumulativeAscentMeters[low]) * fraction
     }
 
+    private fun travelSecondsAt(progressMeters: Double): Double {
+        val (low, fraction) = segmentAt(progressMeters)
+        if (low == cumulativeTravelSeconds.lastIndex) return cumulativeTravelSeconds.last()
+        return cumulativeTravelSeconds[low] +
+            (cumulativeTravelSeconds[low + 1] - cumulativeTravelSeconds[low]) * fraction
+    }
+
     private fun segmentAt(progressMeters: Double): Pair<Int, Double> {
         val progress = progressMeters.coerceIn(0.0, preparedCourse.totalDistanceMeters)
         val distances = preparedCourse.cumulativeDistanceMeters
@@ -90,6 +133,10 @@ class ElevationProfile private constructor(
     }
 
     companion object {
+        /** Report model: V = 6 * exp(-3.5 * |slope|), km/h. */
+        fun toblerWalkingSpeedKmh(gradeRatio: Double): Double =
+            (6.0 * exp(-3.5 * kotlin.math.abs(gradeRatio))).coerceIn(0.5, 6.0)
+
         fun prepare(
             preparedCourse: PreparedCourse,
             minimumAscentMeters: Double = 20.0,
@@ -99,13 +146,26 @@ class ElevationProfile private constructor(
         ): ElevationProfile {
             val points = preparedCourse.course.points
             val cumulativeAscent = DoubleArray(points.size)
+            val cumulativeTravel = DoubleArray(points.size)
             for (index in 1 until points.size) {
                 cumulativeAscent[index] = cumulativeAscent[index - 1]
+                cumulativeTravel[index] = cumulativeTravel[index - 1]
                 if (index in preparedCourse.course.breakBeforePointIndices) continue
                 val previous = points[index - 1].position.elevationMeters
                 val current = points[index].position.elevationMeters
                 if (previous != null && current != null && current > previous) {
                     cumulativeAscent[index] += current - previous
+                }
+                val horizontalMeters = preparedCourse.cumulativeDistanceMeters[index] -
+                    preparedCourse.cumulativeDistanceMeters[index - 1]
+                if (horizontalMeters > 0.0) {
+                    val riseMeters = if (previous != null && current != null) current - previous else 0.0
+                    cumulativeTravel[index] += horizontalMeters /
+                        (toblerWalkingSpeedKmh(riseMeters / horizontalMeters) / 3.6)
+                    if (riseMeters > 0.0) {
+                        cumulativeTravel[index] += riseMeters /
+                            DEFAULT_ASCENT_RATE_METERS_PER_HOUR * 3_600.0
+                    }
                 }
             }
 
@@ -178,9 +238,13 @@ class ElevationProfile private constructor(
 
             return ElevationProfile(
                 cumulativeAscentMeters = cumulativeAscent,
+                cumulativeTravelSeconds = cumulativeTravel,
                 climbs = rawClimbs,
                 preparedCourse = preparedCourse,
             )
         }
+
+        private const val TERRAIN_SAMPLE_SPACING_METERS = 25.0
+        private const val DEFAULT_ASCENT_RATE_METERS_PER_HOUR = 600.0
     }
 }

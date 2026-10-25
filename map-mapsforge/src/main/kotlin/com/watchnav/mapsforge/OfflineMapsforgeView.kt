@@ -5,14 +5,23 @@ import android.content.Context
 import android.view.MotionEvent
 import android.widget.FrameLayout
 import com.watchnav.core.Course
+import com.watchnav.core.CoursePoint
+import com.watchnav.core.CoursePointCategory
+import com.watchnav.core.CoursePointRole
 import com.watchnav.core.CourseRenderSimplifier
 import com.watchnav.core.PreparedCourse
 import com.watchnav.session.NavigationStateHub
 import com.watchnav.session.NavigationTelemetry
 import org.mapsforge.core.graphics.Style
+import org.mapsforge.core.graphics.Align
+import org.mapsforge.core.graphics.FontFamily
+import org.mapsforge.core.graphics.FontStyle
+import org.mapsforge.core.graphics.GraphicFactory
 import org.mapsforge.core.model.LatLong
 import org.mapsforge.core.model.BoundingBox
 import org.mapsforge.core.model.Dimension
+import org.mapsforge.core.model.Point
+import org.mapsforge.core.model.Rotation
 import org.mapsforge.core.util.LatLongUtils
 import org.mapsforge.core.util.MercatorProjection
 import org.mapsforge.map.android.graphics.AndroidGraphicFactory
@@ -20,6 +29,7 @@ import org.mapsforge.map.android.util.AndroidUtil
 import org.mapsforge.map.android.view.MapView
 import org.mapsforge.map.layer.overlay.Circle
 import org.mapsforge.map.layer.overlay.Polyline
+import org.mapsforge.map.layer.Layer
 import org.mapsforge.map.rendertheme.StreamRenderTheme
 import java.io.File
 import kotlin.math.cos
@@ -55,6 +65,7 @@ class OfflineMapsforgeView(
     private val routeLayers = ArrayList<Polyline>()
     private val completedLayers = ArrayList<Polyline>()
     private val landmarkLayers = ArrayList<Circle>()
+    private val landmarkLabelLayer = WaypointLabelLayer(graphicFactory)
     private var followLocation = true
     private var currentTelemetry = NavigationTelemetry()
     private var headingDegrees: Double? = null
@@ -182,6 +193,7 @@ class OfflineMapsforgeView(
         routeLayers.forEach(mapView.layerManager.layers::remove)
         completedLayers.forEach(mapView.layerManager.layers::remove)
         landmarkLayers.forEach(mapView.layerManager.layers::remove)
+        mapView.layerManager.layers.remove(landmarkLabelLayer)
         routeLayers.clear()
         completedLayers.clear()
         landmarkLayers.clear()
@@ -199,7 +211,8 @@ class OfflineMapsforgeView(
                 mapView.layerManager.layers.add(layer)
             }
         }
-        course.landmarks.forEach { landmark ->
+        val visibleLandmarks = course.landmarks.filterNot { it.role == CoursePointRole.SHAPING }
+        visibleLandmarks.forEach { landmark ->
             landmarkLayers += Circle(
                 LatLong(landmark.position.latitude, landmark.position.longitude),
                 10f,
@@ -207,6 +220,8 @@ class OfflineMapsforgeView(
                 stroke(30, 20, 0, 2f),
             ).also(mapView.layerManager.layers::add)
         }
+        landmarkLabelLayer.setPoints(visibleLandmarks)
+        mapView.layerManager.layers.add(landmarkLabelLayer)
         mapView.layerManager.layers.add(locationLayer)
         mapView.layerManager.layers.add(locationArrowLayer)
         mapView.layerManager.layers.add(locationVerticalLayer)
@@ -228,9 +243,11 @@ class OfflineMapsforgeView(
         routeLayers.forEach(mapView.layerManager.layers::remove)
         completedLayers.forEach(mapView.layerManager.layers::remove)
         landmarkLayers.forEach(mapView.layerManager.layers::remove)
+        mapView.layerManager.layers.remove(landmarkLabelLayer)
         routeLayers.clear()
         completedLayers.clear()
         landmarkLayers.clear()
+        landmarkLabelLayer.setPoints(emptyList())
         explorationLayer.setPoints(emptyList())
         mapView.repaint()
     }
@@ -605,4 +622,85 @@ class OfflineMapsforgeView(
     private fun com.watchnav.session.SessionPhase.isActivelyNavigating(): Boolean =
         this == com.watchnav.session.SessionPhase.NAVIGATING ||
             this == com.watchnav.session.SessionPhase.OFF_COURSE
+}
+
+/** Small bounded semantic-label layer. It draws only visible GPX points at useful zoom levels. */
+private class WaypointLabelLayer(graphicFactory: GraphicFactory) : Layer() {
+    private val labelPaint = graphicFactory.createPaint().apply {
+        color = graphicFactory.createColor(255, 255, 255, 255)
+        setTextSize(18f)
+        setTextAlign(Align.LEFT)
+        setTypeface(FontFamily.DEFAULT, FontStyle.BOLD)
+    }
+    private val outlinePaint = graphicFactory.createPaint().apply {
+        color = graphicFactory.createColor(235, 0, 0, 0)
+        setTextSize(18f)
+        setTextAlign(Align.LEFT)
+        setTypeface(FontFamily.DEFAULT, FontStyle.BOLD)
+    }
+    private val glyphPaint = graphicFactory.createPaint().apply {
+        color = graphicFactory.createColor(255, 45, 35, 0)
+        setTextSize(16f)
+        setTextAlign(Align.CENTER)
+        setTypeface(FontFamily.DEFAULT, FontStyle.BOLD)
+    }
+    private var points: List<CoursePoint> = emptyList()
+
+    fun setPoints(value: List<CoursePoint>) {
+        points = value.filterNot { it.role == CoursePointRole.SHAPING }
+        requestRedraw()
+    }
+
+    override fun draw(
+        boundingBox: BoundingBox,
+        zoomLevel: Byte,
+        canvas: org.mapsforge.core.graphics.Canvas,
+        topLeftPoint: Point,
+        rotation: Rotation,
+    ) {
+        if (points.isEmpty()) return
+        val mapSize = MercatorProjection.getMapSize(zoomLevel, displayModel.tileSize)
+        points.asSequence()
+            .filter { point ->
+                point.position.latitude in boundingBox.minLatitude..boundingBox.maxLatitude &&
+                    point.position.longitude in boundingBox.minLongitude..boundingBox.maxLongitude
+            }
+            .take(MAXIMUM_LABELS)
+            .forEach { point ->
+                val pixel = MercatorProjection.getPixel(
+                    LatLong(point.position.latitude, point.position.longitude),
+                    mapSize,
+                )
+                val x = (pixel.x - topLeftPoint.x).roundToInt()
+                val y = (pixel.y - topLeftPoint.y).roundToInt()
+                canvas.drawText(categoryGlyph(point.category), x, y + 5, glyphPaint)
+                if (zoomLevel < LABEL_MINIMUM_ZOOM) return@forEach
+                val label = point.name?.take(10) ?: return@forEach
+                val labelX = x + 13
+                val labelY = y - 9
+                canvas.drawText(label, labelX - 1, labelY, outlinePaint)
+                canvas.drawText(label, labelX + 1, labelY, outlinePaint)
+                canvas.drawText(label, labelX, labelY - 1, outlinePaint)
+                canvas.drawText(label, labelX, labelY + 1, outlinePaint)
+                canvas.drawText(label, labelX, labelY, labelPaint)
+            }
+    }
+
+    private fun categoryGlyph(category: CoursePointCategory): String = when (category) {
+        CoursePointCategory.FOOD -> "●"
+        CoursePointCategory.WATER -> "◆"
+        CoursePointCategory.STORE -> "▣"
+        CoursePointCategory.SHELTER -> "⌂"
+        CoursePointCategory.MEDICAL -> "+"
+        CoursePointCategory.SUMMIT -> "▲"
+        CoursePointCategory.VIEWPOINT -> "◎"
+        CoursePointCategory.DANGER -> "!"
+        CoursePointCategory.FISHING -> "⚓"
+        CoursePointCategory.GENERIC -> "•"
+    }
+
+    private companion object {
+        const val MAXIMUM_LABELS = 16
+        const val LABEL_MINIMUM_ZOOM: Byte = 14
+    }
 }

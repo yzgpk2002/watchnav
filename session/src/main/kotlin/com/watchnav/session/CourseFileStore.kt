@@ -33,6 +33,8 @@ class CourseFileStore(context: Context) {
     private val courseDirectory = File(context.filesDir, "courses")
     private val activeFile = File(courseDirectory, "active.gpx")
     private val activeOriginFile = File(courseDirectory, "active.origin")
+    private val navigationSourceFile = File(courseDirectory, "navigation-source.gpx")
+    private val navigationTargetFile = File(courseDirectory, "navigation-target.txt")
     private val libraryDirectory = File(courseDirectory, "library")
 
     fun import(
@@ -82,6 +84,16 @@ class CourseFileStore(context: Context) {
         activeOriginFile.writeText(libraryOrigin?.name ?: "AUTO")
     }
 
+    private fun writeNavigationSource(bytes: ByteArray) {
+        courseDirectory.mkdirs()
+        val temporary = File(courseDirectory, "navigation-source.gpx.tmp")
+        temporary.outputStream().use { it.write(bytes) }
+        if (!temporary.renameTo(navigationSourceFile)) {
+            temporary.copyTo(navigationSourceFile, overwrite = true)
+            check(temporary.delete()) { "Unable to finish saving navigation source" }
+        }
+    }
+
     fun saveCourse(course: Course, libraryOrigin: CourseLibraryOrigin? = null): StoredCourse {
         requireUsableCourse(course)
         val output = ByteArrayOutputStream()
@@ -95,7 +107,11 @@ class CourseFileStore(context: Context) {
         val course = bytes.inputStream().use { GpxParser().parse(it, fallbackName).course }
         requireUsableCourse(course)
         writeActive(bytes, libraryOrigin)
-        if (libraryOrigin != null) saveToLibrary(bytes, course, libraryOrigin)
+        if (libraryOrigin != null) {
+            saveToLibrary(bytes, course, libraryOrigin)
+            writeNavigationSource(bytes)
+            clearNavigationTarget()
+        }
         return StoredCourse(course, activeFile)
     }
 
@@ -154,6 +170,10 @@ class CourseFileStore(context: Context) {
 
     @Synchronized
     fun rename(entry: CourseLibraryEntry, newName: String): CourseLibraryEntry {
+        val sourceMatches = navigationSourceFile.isFile && runCatching {
+            normalizedLibraryName(loadNavigationSource()?.course?.name.orEmpty()) ==
+                normalizedLibraryName(entry.name)
+        }.getOrDefault(false)
         val normalized = newName.trim().take(80)
         require(normalized.isNotBlank()) { "Route name is empty" }
         val renamed = read(entry).copy(name = normalized)
@@ -168,12 +188,16 @@ class CourseFileStore(context: Context) {
         if (activeFile.isFile && runCatching { load()?.course?.name == entry.name }.getOrDefault(false)) {
             writeActive(bytes, origin)
         }
+        if (sourceMatches) writeNavigationSource(bytes)
         return replacement
     }
 
     @Synchronized
     fun delete(entry: CourseLibraryEntry) {
         val normalizedName = normalizedLibraryName(entry.name)
+        val sourceMatches = navigationSourceFile.isFile && runCatching {
+            normalizedLibraryName(loadNavigationSource()?.course?.name.orEmpty()) == normalizedName
+        }.getOrDefault(false)
         libraryDirectory.listFiles { file -> file.extension.equals("gpx", ignoreCase = true) }
             ?.filter { file ->
                 runCatching { normalizedLibraryName(readLibraryMetadata(file).name) == normalizedName }
@@ -191,6 +215,58 @@ class CourseFileStore(context: Context) {
             activeFile.delete()
             activeOriginFile.delete()
         }
+        if (sourceMatches) {
+            navigationSourceFile.delete()
+            clearNavigationTarget()
+        }
+    }
+
+    /**
+     * Loads the immutable imported/excellent route rather than yesterday's generated approach.
+     * Existing installs are migrated by matching the active route name back to the route library.
+     */
+    fun loadNavigationSource(): StoredCourse? {
+        if (navigationSourceFile.isFile) {
+            runCatching {
+                val course = navigationSourceFile.inputStream().buffered().use { GpxParser().parse(it).course }
+                requireUsableCourse(course)
+                return StoredCourse(course, navigationSourceFile)
+            }.onFailure { navigationSourceFile.delete() }
+        }
+        val active = load() ?: return null
+        val libraryMatch = listLibrary().firstOrNull {
+            normalizedLibraryName(it.name) == normalizedLibraryName(active.course.name)
+        }
+        val source = libraryMatch?.let(::read) ?: active.course
+        val output = ByteArrayOutputStream()
+        GpxWriter.write(source, output)
+        writeNavigationSource(output.toByteArray())
+        return StoredCourse(source, navigationSourceFile)
+    }
+
+    @Synchronized
+    fun setNavigationTarget(position: GeoPoint) {
+        courseDirectory.mkdirs()
+        val temporary = File(courseDirectory, "navigation-target.txt.tmp")
+        temporary.writeText("${position.latitude},${position.longitude}\n")
+        if (!temporary.renameTo(navigationTargetFile)) {
+            temporary.copyTo(navigationTargetFile, overwrite = true)
+            check(temporary.delete()) { "Unable to finish saving navigation target" }
+        }
+    }
+
+    fun loadNavigationTarget(): GeoPoint? = navigationTargetFile.takeIf(File::isFile)
+        ?.readText()
+        ?.trim()
+        ?.split(',')
+        ?.takeIf { it.size == 2 }
+        ?.let { columns ->
+            runCatching { GeoPoint(columns[0].toDouble(), columns[1].toDouble()) }.getOrNull()
+        }
+
+    fun clearNavigationTarget() {
+        navigationTargetFile.delete()
+        File(courseDirectory, "navigation-target.txt.tmp").delete()
     }
 
     private fun normalizedLibraryName(name: String): String =

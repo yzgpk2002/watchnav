@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.view.View
 import com.watchnav.core.Course
 import com.watchnav.core.CoursePoint
+import com.watchnav.core.CoursePointRole
 import com.watchnav.core.GeoMath
 import com.watchnav.core.ManeuverKind
 import com.watchnav.core.PreparedCourse
@@ -196,8 +197,12 @@ class BezelStatsView(context: Context) : View(context) {
         prepared: PreparedCourse?,
     ): List<Pair<CoursePoint, Double>> {
         if (value == null || prepared == null) return emptyList()
-        val points = (value.landmarks + value.points.filter { it.name != null || it.type != null }).distinct()
-        return points.map { landmark ->
+        val trackPoints = value.points.mapIndexedNotNull { index, point ->
+            point.takeIf {
+                it.role != CoursePointRole.SHAPING && (it.name != null || it.type != null)
+            }?.let { it to prepared.cumulativeDistanceMeters[index] }
+        }
+        val externalPoints = value.landmarks.filterNot { it.role == CoursePointRole.SHAPING }.mapNotNull { landmark ->
             val encodedIndex = landmark.type
                 ?.substringAfter("highest-", missingDelimiterValue = "")
                 ?.toIntOrNull()
@@ -205,19 +210,16 @@ class BezelStatsView(context: Context) : View(context) {
             val encodedDistance = landmark.type
                 ?.substringAfter("distance-", missingDelimiterValue = "")
                 ?.toDoubleOrNull()
-            val nearestIndex = when {
-                landmark.type == "start" -> 0
-                landmark.type == "finish" -> value.points.lastIndex
-                encodedIndex != null -> encodedIndex
-                encodedDistance != null -> prepared.cumulativeDistanceMeters
-                    .indexOfFirst { it >= encodedDistance }
-                    .coerceAtLeast(0)
-                else -> value.points.indices.minByOrNull { index ->
-                    GeoMath.distanceMeters(value.points[index].position, landmark.position)
-                } ?: 0
-            }
-            landmark to prepared.cumulativeDistanceMeters[nearestIndex]
-        }.distinctBy { it.first.name to it.second }.sortedBy { it.second }
+            val distance = when {
+                landmark.type == "start" -> 0.0
+                landmark.type == "finish" -> prepared.totalDistanceMeters
+                encodedIndex != null -> prepared.cumulativeDistanceMeters[encodedIndex]
+                encodedDistance != null -> encodedDistance
+                else -> prepared.distanceAxisProjection(landmark.position)
+            } ?: return@mapNotNull null
+            landmark to distance
+        }
+        return (trackPoints + externalPoints).distinctBy { it.first.name to it.second }.sortedBy { it.second }
     }
 
     private fun ratio(value: Double, total: Double): Float =

@@ -16,6 +16,7 @@ class TrackStore(context: Context) {
     private val trackFile = File(activityDirectory, "latest-track.csv")
     private val points = ArrayList<CoursePoint>()
     private val pendingLines = ArrayList<String>()
+    private var recordedDistanceMeters = 0.0
 
     init {
         loadExisting()
@@ -25,6 +26,7 @@ class TrackStore(context: Context) {
     fun startNew() {
         points.clear()
         pendingLines.clear()
+        recordedDistanceMeters = 0.0
         activityDirectory.mkdirs()
         trackFile.writeText(HEADER)
     }
@@ -37,12 +39,13 @@ class TrackStore(context: Context) {
             time = Instant.ofEpochMilli(fix.timestampMillis),
         )
         val previous = points.lastOrNull()
-        if (previous != null) {
-            val distance = GeoMath.distanceMeters(previous.position, point.position)
+        val distance = previous?.let { GeoMath.distanceMeters(it.position, point.position) }
+        if (previous != null && distance != null) {
             val elapsed = fix.timestampMillis - (previous.time?.toEpochMilli() ?: 0L)
             if (distance < MINIMUM_DISTANCE_METERS && elapsed < MAXIMUM_INTERVAL_MILLIS) return
         }
         points += point
+        recordedDistanceMeters += distance ?: 0.0
         pendingLines += encode(point)
         if (pendingLines.size >= FLUSH_POINT_COUNT) flush()
     }
@@ -89,6 +92,9 @@ class TrackStore(context: Context) {
     fun pointCount(): Int = points.size
 
     @Synchronized
+    fun recordedDistanceMeters(): Double = recordedDistanceMeters
+
+    @Synchronized
     fun recentPositions(maximumPoints: Int = 80): List<com.watchnav.core.GeoPoint> = points
         .takeLast(maximumPoints.coerceAtLeast(2))
         .map(CoursePoint::position)
@@ -102,7 +108,12 @@ class TrackStore(context: Context) {
     private fun loadExisting() {
         if (!trackFile.isFile) return
         trackFile.useLines { lines ->
-            lines.drop(1).take(MAXIMUM_POINTS).mapNotNull(::decode).forEach(points::add)
+            lines.drop(1).take(MAXIMUM_POINTS).mapNotNull(::decode).forEach { point ->
+                recordedDistanceMeters += points.lastOrNull()?.let {
+                    GeoMath.distanceMeters(it.position, point.position)
+                } ?: 0.0
+                points += point
+            }
         }
     }
 

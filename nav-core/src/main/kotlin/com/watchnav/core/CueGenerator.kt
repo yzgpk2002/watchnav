@@ -11,6 +11,17 @@ object CueGenerator {
         val course = preparedCourse.course
         val cues = ArrayList<NavigationCue>()
         cues += NavigationCue(0, 0.0, ManeuverKind.START, "Start")
+        val explicitCues = course.points.mapIndexedNotNull { index, point ->
+            val maneuver = point.maneuver ?: CourseSemantics.maneuver(point.symbol) ?: return@mapIndexedNotNull null
+            if (index == 0 || index == course.points.lastIndex) return@mapIndexedNotNull null
+            NavigationCue(
+                pointIndex = index,
+                distanceFromStartMeters = preparedCourse.cumulativeDistanceMeters[index],
+                kind = maneuver,
+                label = point.name ?: point.description ?: point.symbol,
+            )
+        }
+        cues += explicitCues
         var lastCueDistance = 0.0
         for (index in 1 until course.points.lastIndex) {
             if (index in course.breakBeforePointIndices || index + 1 in course.breakBeforePointIndices) continue
@@ -25,6 +36,7 @@ object CueGenerator {
             val turn = GeoMath.signedTurnDegrees(incoming, outgoing)
             val distance = preparedCourse.cumulativeDistanceMeters[index]
             if (abs(turn) < minimumTurnDegrees || distance - lastCueDistance < minimumSpacingMeters) continue
+            if (explicitCues.any { abs(it.distanceFromStartMeters - distance) < minimumSpacingMeters }) continue
             cues += NavigationCue(index, distance, classify(turn))
             lastCueDistance = distance
         }
@@ -34,7 +46,7 @@ object CueGenerator {
             ManeuverKind.FINISH,
             "Finish",
         )
-        return cues
+        return cues.sortedWith(compareBy<NavigationCue> { it.distanceFromStartMeters }.thenBy { it.pointIndex })
     }
 
     private fun classify(turnDegrees: Double): ManeuverKind = when {

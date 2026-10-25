@@ -55,7 +55,7 @@ import androidx.lifecycle.lifecycleScope
 import com.watchnav.core.ActivityMode
 import com.watchnav.core.Course
 import com.watchnav.core.CoursePoint
-import com.watchnav.core.continuationFromNearestPoint
+import com.watchnav.core.CoursePointRole
 import com.watchnav.core.CoordinateSystem
 import com.watchnav.core.GeoMath
 import com.watchnav.core.GeoPoint
@@ -151,6 +151,7 @@ class MainActivity : ComponentActivity() {
     private val tideRepository by lazy { TideForecastRepository(this) }
     private var tideRefreshJob: Job? = null
     private var routeApproachJob: Job? = null
+    private var pendingStartupApproachCourse: Course? = null
     private var exitingApplication = false
     private val fishingLocationListener = LocationListener { location ->
         val point = GeoPoint(location.latitude, location.longitude, location.altitude.takeIf { location.hasAltitude() })
@@ -164,6 +165,7 @@ class MainActivity : ComponentActivity() {
         fishingPosition = point
         LastNavigationFixStore(this).save(requireNotNull(directLocationFix))
         renderDirectLocation(requireNotNull(directLocationFix))
+        maybeRefreshStartupApproach(requireNotNull(directLocationFix))
         fishingDashboardView.setPosition(requireNotNull(fishingPosition))
         refreshTideForecast(requireNotNull(fishingPosition))
         if (pendingFishingQuickPin) {
@@ -483,7 +485,10 @@ class MainActivity : ComponentActivity() {
         ) {
             val scroll = event.getAxisValue(MotionEvent.AXIS_SCROLL)
             if (scroll != 0f) {
-                if (currentPage == AppPage.FISHING.ordinal) {
+                if (currentPage == AppPage.NAVIGATION.ordinal) {
+                    navigationCourseMapView.zoomBy(if (scroll > 0f) 1 else -1)
+                    navigationCourseMapView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                } else if (currentPage == AppPage.FISHING.ordinal) {
                     fishingDashboardView.onRotary(scroll)
                 } else if (offlineMapView != null || satelliteMapView != null) {
                     offlineMapView?.zoomBy(if (scroll > 0f) 1 else -1)
@@ -1410,14 +1415,20 @@ class MainActivity : ComponentActivity() {
     private fun loadStoredCourse() {
         statusText.setText(R.string.loading_course)
         lifecycleScope.launch {
-            runCatching { withContext(Dispatchers.IO) { courseStore.load() } }
+            val navigationActive = NavigationStateHub.current.phase != SessionPhase.IDLE
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    if (navigationActive) courseStore.load() else courseStore.loadNavigationSource()
+                }
+            }
                 .onSuccess { stored ->
                     if (stored == null) {
                         courseText.setText(R.string.no_course)
                         statusText.setText(R.string.select_course_hint)
                     } else {
                         activateCourse(stored.course)
-                        if (NavigationStateHub.current.phase == SessionPhase.IDLE) {
+                        if (!navigationActive) {
+                            pendingStartupApproachCourse = stored.course
                             statusText.setText(R.string.course_ready)
                         }
                     }
@@ -1690,6 +1701,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun activateCourseWithAutomaticApproach(selectedCourse: Course) {
         routeApproachJob?.cancel()
+        pendingStartupApproachCourse = null
         val previousPosition = NavigationStateHub.current.position
         if (NavigationStateHub.current.phase != SessionPhase.IDLE) {
             NavigationSessionService.stop(this)
@@ -1702,10 +1714,13 @@ class MainActivity : ComponentActivity() {
             activateCourse(selectedCourse)
             return
         }
-        val continuation = selectedCourse.continuationFromNearestPoint(origin)
-        val destination = continuation.joinPosition
-        val forwardCourse = continuation.course
-        if (continuation.distanceMeters <= APPROACH_COMPLETE_DISTANCE_METERS) {
+        // Always approach the visible GPX start. Nearest-segment snapping previously selected
+        // point 92/100 on a real outdoor route while the user correctly walked to point 1.
+        val destination = RouteApproachTarget.select(selectedCourse)
+        val forwardCourse = selectedCourse
+        val approachDistance = GeoMath.distanceMeters(origin, destination)
+        courseStore.clearNavigationTarget()
+        if (approachDistance <= APPROACH_COMPLETE_DISTANCE_METERS) {
             activateCourse(forwardCourse)
             lifecycleScope.launch {
                 runCatching { withContext(Dispatchers.IO) { courseStore.saveCourse(forwardCourse) } }
@@ -1721,7 +1736,13 @@ class MainActivity : ComponentActivity() {
                 is RouteResult.Success -> combineApproachWithCourse(result.course, forwardCourse)
                 else -> forwardCourse
             }
-            runCatching { withContext(Dispatchers.IO) { courseStore.saveCourse(finalCourse) } }
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val stored = courseStore.saveCourse(finalCourse)
+                    if (result is RouteResult.Success) courseStore.setNavigationTarget(destination)
+                    stored
+                }
+            }
                 .onSuccess { stored ->
                     val navigationAlreadyStarted = NavigationStateHub.current.phase != SessionPhase.IDLE
                     activateCourse(stored.course)
@@ -1747,6 +1768,17 @@ class MainActivity : ComponentActivity() {
                 }
                 .onFailure(::showImportError)
         }
+    }
+
+    private fun maybeRefreshStartupApproach(fix: LocationFix) {
+        val source = pendingStartupApproachCourse ?: return
+        if (NavigationStateHub.current.phase != SessionPhase.IDLE) return
+        val ageMillis = System.currentTimeMillis() - fix.timestampMillis
+        if (ageMillis !in 0..MAXIMUM_APPROACH_ORIGIN_AGE_MILLIS ||
+            fix.accuracyMeters > MAXIMUM_APPROACH_ORIGIN_ACCURACY_METERS
+        ) return
+        pendingStartupApproachCourse = null
+        activateCourseWithAutomaticApproach(source)
     }
 
     private suspend fun calculateRoadApproach(origin: GeoPoint, destination: GeoPoint): RouteResult {
@@ -1782,14 +1814,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun combineApproachWithCourse(approach: Course, selectedCourse: Course): Course {
-        val prefix = approach.points.dropLast(1)
-        val shift = prefix.size
-        return selectedCourse.copy(
-            points = prefix + selectedCourse.points,
-            breakBeforePointIndices = approach.breakBeforePointIndices
-                .filterTo(linkedSetOf()) { it < approach.points.lastIndex }
-                .plus(selectedCourse.breakBeforePointIndices.map { it + shift }),
-        )
+        return ContinuousRouteAssembler.combine(approach, selectedCourse)
     }
 
     private suspend fun routeWithAutomaticRegionDownload(request: RouteRequest): RouteResult =
@@ -1865,8 +1890,10 @@ class MainActivity : ComponentActivity() {
     private fun addImportantLandmarks(course: Course): Course {
         val prepared = PreparedCourse.prepare(course)
         val landmarks = ArrayList<CoursePoint>()
-        landmarks += course.landmarks
-        landmarks += course.points.filter { !it.name.isNullOrBlank() || !it.type.isNullOrBlank() }
+        landmarks += course.landmarks.filterNot { it.role == CoursePointRole.SHAPING }
+        landmarks += course.points.filter {
+            it.role != CoursePointRole.SHAPING && (!it.name.isNullOrBlank() || !it.type.isNullOrBlank())
+        }
 
         fun add(point: CoursePoint) {
             if (landmarks.none { it.name == point.name && it.type == point.type }) landmarks += point
@@ -2544,6 +2571,7 @@ class MainActivity : ComponentActivity() {
                 LastNavigationFixStore(this).save(requireNotNull(directLocationFix))
                 fishingPosition = point
                 renderDirectLocation(requireNotNull(directLocationFix))
+                maybeRefreshStartupApproach(requireNotNull(directLocationFix))
                 fishingDashboardView.setPosition(requireNotNull(fishingPosition))
                 refreshTideForecast(requireNotNull(fishingPosition))
             }
@@ -2815,6 +2843,8 @@ class MainActivity : ComponentActivity() {
         const val BUNDLED_COURSE_DIRECTORY = "seed-courses"
         const val MAXIMUM_AUTOMATIC_ROUTING_DOWNLOADS = 4
         const val APPROACH_COMPLETE_DISTANCE_METERS = 8.0
+        const val MAXIMUM_APPROACH_ORIGIN_AGE_MILLIS = 2 * 60_000L
+        const val MAXIMUM_APPROACH_ORIGIN_ACCURACY_METERS = 100.0
         const val ORIENTATION_UPDATE_INTERVAL_NANOS = 500_000_000L
         const val ORIENTATION_SENSOR_INTERVAL_MICROS = 500_000
         const val ORIENTATION_SENSOR_BATCH_MICROS = 1_000_000

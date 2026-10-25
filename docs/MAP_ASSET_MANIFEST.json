@@ -1,0 +1,35 @@
+{
+  "release": "v0.20.39",
+  "preparedAt": "2026-10-25",
+  "assets": [
+    {
+      "file": "E120_N30-20260816.rd5",
+      "bytes": 16408748,
+      "sha256": "0165533ffff08e2e178d57001499c6840a9b4d378687198d21ae456b921d0c9f",
+      "source": "https://brouter.de/brouter/segments4/E120_N30.rd5",
+      "snapshotDate": "2026-08-16",
+      "license": "ODbL-1.0",
+      "attribution": "OpenStreetMap contributors; BRouter preprocessing",
+      "licenseUrl": "https://www.openstreetmap.org/copyright"
+    },
+    {
+      "file": "sentinel2-2025-test.mbtiles",
+      "bytes": 5414912,
+      "sha256": "3b49ac3cbd465b7cb2726c989504e7af4d05ad37b24f24e531c31697373ad60c",
+      "source": "https://cloudless.eox.at",
+      "imageryYear": 2025,
+      "license": "CC-BY-NC-SA-4.0",
+      "attribution": "EOxCloudless https://cloudless.eox.at by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2025)",
+      "licenseUrl": "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+    }
+  ],
+  "localOnly": [
+    {
+      "file": "WatchNav-contour-from-watch.map",
+      "bytes": 584888737,
+      "provider": "OpenAndroMaps (verified from Mapsforge header)",
+      "reason": "Bundling with an app requires provider permission. Download independently from the provider website.",
+      "licenseUrl": "https://www.openandromaps.org/en/license"
+    }
+  ]
+}

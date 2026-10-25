@@ -15,6 +15,8 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import com.watchnav.core.Course
+import com.watchnav.core.CoursePointCategory
+import com.watchnav.core.CoursePointRole
 import com.watchnav.core.GeoPoint
 import com.watchnav.session.NavigationTelemetry
 import com.watchnav.mapsforge.MapViewport
@@ -76,6 +78,13 @@ class WatchMbtilesMapView(context: Context, file: File) : View(context), AutoClo
     }
     private val positionCenterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(192, 96, 255); style = Paint.Style.FILL
+    }
+    private val waypointPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(24, 211, 228); style = Paint.Style.FILL
+    }
+    private val waypointTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = resources.displayMetrics.density * 11f
+        textAlign = Paint.Align.CENTER; typeface = android.graphics.Typeface.DEFAULT_BOLD
     }
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
@@ -269,6 +278,25 @@ class WatchMbtilesMapView(context: Context, file: File) : View(context), AutoClo
             }
             canvas.drawPath(routePath, routePaint)
         }
+        course?.landmarks
+            ?.asSequence()
+            ?.filterNot { it.role == CoursePointRole.SHAPING }
+            ?.map { point ->
+                Triple(
+                    point,
+                    (lonToWorld(point.position.longitude, zoom) - left).toFloat(),
+                    (latToWorld(point.position.latitude, zoom) - top).toFloat(),
+                )
+            }
+            ?.filter { (_, x, y) -> x in 0f..width.toFloat() && y in 0f..height.toFloat() }
+            ?.take(MAXIMUM_VISIBLE_WAYPOINTS)
+            ?.forEach { (point, x, y) ->
+                canvas.drawCircle(x, y, resources.displayMetrics.density * 7f, waypointPaint)
+                canvas.drawText(categoryGlyph(point.category), x, y + resources.displayMetrics.density * 4f, waypointTextPaint)
+                if (zoom >= WAYPOINT_LABEL_MINIMUM_ZOOM) {
+                    point.name?.take(8)?.let { canvas.drawText(it, x, y - resources.displayMetrics.density * 10f, waypointTextPaint) }
+                }
+            }
         explorationTrail.takeIf { it.size >= 2 }?.let { points ->
             explorationPath.rewind()
             points.forEachIndexed { index, point ->
@@ -293,6 +321,18 @@ class WatchMbtilesMapView(context: Context, file: File) : View(context), AutoClo
     }
 
     private fun Course?.orEmptyBreaks() = this?.breakBeforePointIndices ?: emptySet()
+    private fun categoryGlyph(category: CoursePointCategory): String = when (category) {
+        CoursePointCategory.FOOD -> "●"
+        CoursePointCategory.WATER -> "◆"
+        CoursePointCategory.STORE -> "▣"
+        CoursePointCategory.SHELTER -> "⌂"
+        CoursePointCategory.MEDICAL -> "+"
+        CoursePointCategory.SUMMIT -> "▲"
+        CoursePointCategory.VIEWPOINT -> "◎"
+        CoursePointCategory.DANGER -> "!"
+        CoursePointCategory.FISHING -> "⚓"
+        CoursePointCategory.GENERIC -> "•"
+    }
     private fun requestTile(key: String, z: Int, x: Int, y: Int, n: Int) {
         if (!pending.add(key)) return
         worker.execute {
@@ -336,5 +376,7 @@ class WatchMbtilesMapView(context: Context, file: File) : View(context), AutoClo
     private companion object {
         const val TILE = 256.0
         const val NAVIGATION_ZOOM = 17
+        const val MAXIMUM_VISIBLE_WAYPOINTS = 20
+        const val WAYPOINT_LABEL_MINIMUM_ZOOM = 15
     }
 }

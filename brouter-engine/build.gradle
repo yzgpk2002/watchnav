@@ -14,13 +14,13 @@ android {
     sourceSets {
         main {
             java.srcDirs += [
-                '../../third-party/brouter/brouter-core/src/main/java',
-                '../../third-party/brouter/brouter-mapaccess/src/main/java',
-                '../../third-party/brouter/brouter-util/src/main/java',
-                '../../third-party/brouter/brouter-expressions/src/main/java',
-                '../../third-party/brouter/brouter-codec/src/main/java',
+                '../third-party/brouter/brouter-core/src/main/java',
+                '../third-party/brouter/brouter-mapaccess/src/main/java',
+                '../third-party/brouter/brouter-util/src/main/java',
+                '../third-party/brouter/brouter-expressions/src/main/java',
+                '../third-party/brouter/brouter-codec/src/main/java',
             ]
-            assets.srcDirs += ['../../third-party/brouter/misc/profiles2']
+            assets.srcDirs += ['../third-party/brouter/misc/profiles2']
         }
     }
 

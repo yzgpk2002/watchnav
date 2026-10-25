@@ -107,7 +107,17 @@ class BRouterOfflineRouter(context: Context) : OfflineRouter {
     private fun ensureRoutingAssets(profile: RoutingProfile) {
         profileDirectory.mkdirs()
         copyAssetIfMissing(LOOKUPS_ASSET, File(profileDirectory, LOOKUPS_ASSET))
-        copyAssetIfMissing(profileAsset(profile), profileFile(profile))
+        installProfile(profile)
+    }
+
+    private fun installProfile(profile: RoutingProfile) {
+        val assetName = profileAsset(profile)
+        val source = applicationContext.assets.open(assetName).bufferedReader().use { it.readText() }
+        val configured = configureProfile(source, profile)
+        val destination = profileFile(profile)
+        if (!destination.isFile || destination.readText() != configured) {
+            destination.writeText(configured)
+        }
     }
 
     private fun runEngine(request: RouteRequest, waypointCatchingRangeMeters: Double? = null): RouteResult {
@@ -188,3 +198,21 @@ class BRouterOfflineRouter(context: Context) : OfflineRouter {
         }
     }
 }
+
+/** Applies WatchNav's bounded mountain-routing policy to the bundled BRouter profile. */
+internal fun configureProfile(source: String, profile: RoutingProfile): String =
+    if (profile == RoutingProfile.HIKE) {
+        source
+            // Terrain is a route cost, not merely post-route decoration. This activates the
+            // profile's uphill/downhill penalties while retaining BRouter's bounded memory.
+            .replace(
+                Regex("assign\\s+consider_elevation\\s*=\\s*false"),
+                "assign   consider_elevation     = true",
+            )
+            .replace(
+                Regex("assign\\s+hiking_routes_preference\\s+0\\.20"),
+                "assign   hiking_routes_preference 0.35",
+            )
+    } else {
+        source
+    }

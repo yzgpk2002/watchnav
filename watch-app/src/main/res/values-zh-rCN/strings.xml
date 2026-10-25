@@ -286,4 +286,5 @@
     <string name="route_point_count">%1$d 点</string>
     <string name="route_start_distance">起点 %1$.1f 公里</string>
     <string name="exit_application">退出 APP</string>
+    <string name="deviation_distance">偏航 %1$.0f 米</string>
 </resources>

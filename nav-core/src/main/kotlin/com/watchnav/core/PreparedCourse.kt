@@ -22,6 +22,26 @@ class PreparedCourse private constructor(
 
     val totalDistanceMeters: Double = cumulativeDistanceMeters.last()
 
+    fun distanceAxisProjection(point: GeoPoint, maximumCrossTrackMeters: Double = 150.0): Double? {
+        var bestDistance = Double.POSITIVE_INFINITY
+        var bestProgress: Double? = null
+        val candidates = candidateSegmentIndices(point, maximumCrossTrackMeters)
+        if (candidates.isEmpty()) return null
+        candidates.forEach { segmentIndex ->
+            val segment = segments.getOrNull(segmentIndex) ?: return@forEach
+            val projection = GeoMath.projectOnSegment(
+                point,
+                course.points[segment.startPointIndex].position,
+                course.points[segment.endPointIndex].position,
+            )
+            if (projection.distanceMeters < bestDistance) {
+                bestDistance = projection.distanceMeters
+                bestProgress = segment.startDistanceMeters + segment.lengthMeters * projection.fraction
+            }
+        }
+        return bestProgress?.takeIf { bestDistance <= maximumCrossTrackMeters }
+    }
+
     fun candidateSegmentIndices(point: GeoPoint, radiusMeters: Double): IntArray {
         val latitudeRadius = radiusMeters / 111_320.0
         val lonScale = max(0.15, cos(Math.toRadians(point.latitude)))

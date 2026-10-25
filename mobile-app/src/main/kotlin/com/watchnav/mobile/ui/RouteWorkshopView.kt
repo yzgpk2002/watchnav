@@ -13,6 +13,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.watchnav.core.Course
+import com.watchnav.core.CoursePointMetrics
+import com.watchnav.core.CoursePointRole
 import com.watchnav.core.PreparedCourse
 import com.watchnav.mobile.R
 import kotlin.math.roundToInt
@@ -25,6 +27,7 @@ class RouteWorkshopView(context: Context) : FrameLayout(context) {
     val distanceText: TextView
     val durationText: TextView
     val startText: TextView
+    val semanticText: TextView
     val dependencyText: TextView
     val statusText: TextView
     val importButton: Button
@@ -153,6 +156,12 @@ class RouteWorkshopView(context: Context) : FrameLayout(context) {
             setTextColor(Color.WHITE)
         }
         summary.addView(startText, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(7) })
+        semanticText = TextView(context).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(185, 192, 196))
+            maxLines = 1
+        }
+        summary.addView(semanticText, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         dependencyText = TextView(context).apply {
             setText(R.string.dependencies_missing)
             textSize = 14f
@@ -202,6 +211,7 @@ class RouteWorkshopView(context: Context) : FrameLayout(context) {
             distanceText.text = "— km"
             durationText.text = "—"
             startText.text = context.getString(R.string.route_start, "—")
+            semanticText.text = ""
             dependencyText.setText(R.string.dependencies_missing)
             sendButton.isEnabled = false
             shareButton.isEnabled = false
@@ -218,6 +228,12 @@ class RouteWorkshopView(context: Context) : FrameLayout(context) {
             R.string.route_start,
             course.landmarks.firstOrNull()?.name ?: course.points.firstOrNull()?.name ?: "路线起点",
         )
+        val allPoints = course.points + course.landmarks
+        val poiCount = course.landmarks.count { it.role != CoursePointRole.SHAPING }
+        val viaCount = allPoints.count { it.role == CoursePointRole.VIA }
+        val cueCount = course.points.count { it.maneuver != null }
+        val sensorCount = course.points.count { it.metrics != CoursePointMetrics() }
+        semanticText.text = context.getString(R.string.route_semantics, poiCount, viaCount, cueCount, sensorCount)
         dependencyText.setText(if (dependenciesReady) R.string.dependencies_ready else R.string.dependencies_missing)
         dependencyText.setTextColor(if (dependenciesReady) Color.rgb(54, 211, 120) else CYAN)
         sendButton.isEnabled = true

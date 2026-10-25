@@ -14,6 +14,7 @@
     <string name="route_distance">%1$.1f km</string>
     <string name="route_duration">预计 %1$d 小时 %2$d 分</string>
     <string name="route_start">起点：%1$s</string>
+    <string name="route_semantics">标点 %1$d · 必经 %2$d · 转向 %3$d · 传感 %4$d</string>
     <string name="dependencies_ready">地图 · 等深线 · 路网 · 潮汐 已就绪</string>
     <string name="dependencies_missing">离线资料待准备</string>
     <string name="import_gpx_kml">接收</string>

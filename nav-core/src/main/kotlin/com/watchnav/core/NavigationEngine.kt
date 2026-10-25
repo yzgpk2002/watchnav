@@ -5,11 +5,14 @@ data class NavigationUpdate(
     val adherence: AdherenceUpdate,
     val nextCue: NavigationCue?,
     val distanceToNextCueMeters: Double?,
+    val nextMilestone: CourseMilestone?,
+    val distanceToNextMilestoneMeters: Double?,
 )
 
 class NavigationEngine(course: Course, mode: ActivityMode) {
     val preparedCourse: PreparedCourse = PreparedCourse.prepare(course)
     val cues: List<NavigationCue> = CueGenerator.generate(preparedCourse)
+    val milestones: List<CourseMilestone> = buildMilestones(preparedCourse)
     private val matcher = CourseMatcher(preparedCourse)
     private val offCourseDetector = OffCourseDetector(mode)
 
@@ -18,8 +21,13 @@ class NavigationEngine(course: Course, mode: ActivityMode) {
         val adherence = offCourseDetector.update(
             crossTrackDistanceMeters = match.crossTrackDistanceMeters,
             horizontalAccuracyMeters = fix.accuracyMeters,
+            innovationSquared = match.innovationSquared,
+            forkAmbiguous = match.forkAmbiguous,
         )
         val nextCue = cues.firstOrNull {
+            it.distanceFromStartMeters > match.stableProgressMeters + 3.0
+        }
+        val nextMilestone = milestones.firstOrNull {
             it.distanceFromStartMeters > match.stableProgressMeters + 3.0
         }
         return NavigationUpdate(
@@ -27,6 +35,10 @@ class NavigationEngine(course: Course, mode: ActivityMode) {
             adherence = adherence,
             nextCue = nextCue,
             distanceToNextCueMeters = nextCue?.let {
+                (it.distanceFromStartMeters - match.stableProgressMeters).coerceAtLeast(0.0)
+            },
+            nextMilestone = nextMilestone,
+            distanceToNextMilestoneMeters = nextMilestone?.let {
                 (it.distanceFromStartMeters - match.stableProgressMeters).coerceAtLeast(0.0)
             },
         )
@@ -43,4 +55,20 @@ class NavigationEngine(course: Course, mode: ActivityMode) {
 
     fun segmentBearingDegrees(match: CourseMatch): Double? =
         preparedCourse.segments.getOrNull(match.segmentIndex)?.bearingDegrees
+
+    private fun buildMilestones(prepared: PreparedCourse): List<CourseMilestone> {
+        val onTrack = prepared.course.points.mapIndexedNotNull { index, point ->
+            point.takeIf(CourseSemantics::isVisibleMilestone)?.let {
+                CourseMilestone(it, prepared.cumulativeDistanceMeters[index])
+            }
+        }
+        val waypoints = prepared.course.landmarks.mapNotNull { point ->
+            point.takeIf(CourseSemantics::isVisibleMilestone)?.let {
+                prepared.distanceAxisProjection(it.position)?.let { distance -> CourseMilestone(it, distance) }
+            }
+        }
+        return (onTrack + waypoints)
+            .sortedBy(CourseMilestone::distanceFromStartMeters)
+            .distinctBy { "${it.point.name}:${it.distanceFromStartMeters.toInt()}" }
+    }
 }

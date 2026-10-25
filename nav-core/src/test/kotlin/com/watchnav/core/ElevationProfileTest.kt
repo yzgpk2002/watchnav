@@ -46,6 +46,31 @@ class ElevationProfileTest {
         assertEquals(course.points.last(), reversed.points.first())
     }
 
+    @Test
+    fun terrainRoughnessAndToblerNaismithEtaReactToClimbing() {
+        val flat = ElevationProfile.prepare(
+            PreparedCourse.prepare(
+                Course(
+                    "Flat",
+                    (0..10).map { point(31.0 + it * 0.001, 100.0) },
+                ),
+            ),
+        )
+        val mountain = ElevationProfile.prepare(
+            PreparedCourse.prepare(
+                Course(
+                    "Mountain",
+                    (0..10).map { point(31.0 + it * 0.001, 100.0 + it * 20.0) },
+                ),
+            ),
+        )
+
+        assertTrue((flat.terrainRoughnessMeters(500.0) ?: 99.0) < 1.0)
+        assertTrue((mountain.terrainRoughnessMeters(500.0) ?: 0.0) > 10.0)
+        assertTrue(mountain.estimatedTravelTimeSeconds(0.0) > flat.estimatedTravelTimeSeconds(0.0))
+        assertEquals(6.0, ElevationProfile.toblerWalkingSpeedKmh(0.0), 0.001)
+    }
+
     private fun point(latitude: Double, elevation: Double) =
         CoursePoint(GeoPoint(latitude, 121.0, elevation))
 }

@@ -1,6 +1,7 @@
 package com.watchnav.session
 
 import com.watchnav.core.CourseAdherence
+import com.watchnav.core.CoursePoint
 import com.watchnav.core.GeoPoint
 import com.watchnav.core.ManeuverKind
 import java.util.concurrent.CopyOnWriteArraySet
@@ -32,7 +33,12 @@ data class NavigationTelemetry(
     val gradePercent: Double? = null,
     val verticalSpeedMetersPerHour: Double? = null,
     val nextManeuver: ManeuverKind? = null,
+    val nextManeuverLabel: String? = null,
     val distanceToNextManeuverMeters: Double? = null,
+    val upAheadPoint: CoursePoint? = null,
+    val distanceToUpAheadMeters: Double? = null,
+    val upAheadEtaMillis: Long? = null,
+    val routeEtaMillis: Long? = null,
     val adherence: CourseAdherence = CourseAdherence.ON_COURSE,
     val totalAscentMeters: Double = 0.0,
     val remainingAscentMeters: Double = 0.0,
