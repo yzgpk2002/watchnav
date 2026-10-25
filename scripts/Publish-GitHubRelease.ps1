@@ -29,8 +29,6 @@ try {
     if ($MakePublic) {
         gh repo edit $repository --visibility public --accept-visibility-change-consequences
         if ($LASTEXITCODE -ne 0) { throw 'Visibility change failed.' }
-        gh api "repos/$repository" --method PATCH -f default_branch=$Target --silent
-        if ($LASTEXITCODE -ne 0) { throw 'Default branch update failed.' }
     }
     gh api "repos/$repository" --jq '{visibility,default_branch,html_url}'
     gh release view $Tag --repo $repository --json url,isDraft,assets
